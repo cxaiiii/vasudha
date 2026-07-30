@@ -1,0 +1,154 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vasudha"
+version = "0.1.0"
+description = "Research-grade efficient reasoning language model framework"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Vasudha Contributors" },
+]
+keywords = [
+    "language-model",
+    "mixture-of-experts",
+    "linear-attention",
+    "reasoning",
+    "efficient-llm",
+    "triton",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# ── Core dependencies ──────────────────────────────────────────────────────────
+dependencies = [
+    # Deep learning
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+
+    # Hugging Face ecosystem
+    "transformers>=4.44.0",
+    "accelerate>=0.33.0",
+    "peft>=0.12.0",
+    "trl>=0.10.0",
+    "datasets>=2.21.0",
+    "tokenizers>=0.19.0",
+    "huggingface-hub>=0.24.0",
+
+    # Quantization (QLoRA)
+    "bitsandbytes>=0.43.0",
+
+    # Config management
+    "hydra-core>=1.3.2",
+    "omegaconf>=2.3.0",
+
+    # Logging & monitoring
+    "rich>=13.7.0",
+    "tensorboard>=2.17.0",
+
+    # Scientific computing
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+    "einops>=0.8.0",
+
+    # Data utilities
+    "tqdm>=4.66.0",
+    "safetensors>=0.4.4",
+
+    # Type hints
+    "typing-extensions>=4.12.0",
+]
+
+[project.optional-dependencies]
+# ── Optional: Triton kernels (CUDA only) ───────────────────────────────────────
+triton = [
+    "triton>=2.3.0",
+]
+
+# ── Optional: FlashAttention-2 ────────────────────────────────────────────────
+flash = [
+    "flash-attn>=2.6.0",
+]
+
+# ── Optional: Weights & Biases ────────────────────────────────────────────────
+wandb = [
+    "wandb>=0.18.0",
+]
+
+# ── Optional: Evaluation harness ─────────────────────────────────────────────
+eval = [
+    "lm-eval>=0.4.3",
+    "vllm>=0.6.0",
+]
+
+# ── Development ───────────────────────────────────────────────────────────────
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.11.0",
+    "pre-commit>=3.8.0",
+    "ipykernel>=6.29.0",
+    "jupyter>=1.1.0",
+]
+
+# ── Everything ────────────────────────────────────────────────────────────────
+all = [
+    "vasudha[triton,flash,wandb,eval]",
+]
+
+[project.scripts]
+vasudha-train = "vasudha.scripts.train:main"
+vasudha-eval = "vasudha.scripts.evaluate:main"
+
+[project.urls]
+Homepage = "https://github.com/vasudha-ai/vasudha"
+Documentation = "https://vasudha.readthedocs.io"
+Repository = "https://github.com/vasudha-ai/vasudha"
+Issues = "https://github.com/vasudha-ai/vasudha/issues"
+
+# ── Tool configuration ────────────────────────────────────────────────────────
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vasudha*", "evaluation*"]
+
+[tool.setuptools.package-data]
+vasudha = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vasudha"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+]

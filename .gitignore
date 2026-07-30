@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-link
+pip-wheel-metadata/
+share/python-wheels/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Linting
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Hydra outputs
+outputs/
+multirun/
+.hydra/
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+!tests/**/*.pt          # allow test fixtures
+checkpoints/
+runs/
+logs/
+wandb/
+
+# Triton cache
+.triton/
+triton_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_meta
+
+# Data
+data/
+datasets/
+*.jsonl
+*.json.gz
+*.parquet
+
+# GGUF
+*.gguf
+*.ggml
+
+# HuggingFace cache (large)
+.cache/
+huggingface/
+
+# Build artifacts
+*.o
+*.a
+*.lib
+
+# Profiling
+*.prof
+*.lprof

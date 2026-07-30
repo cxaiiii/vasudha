@@ -1,0 +1,44 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Standard Evaluation Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Benchmarks to run ────────────────────────────────────────────────────────
+benchmarks:
+  - gsm8k
+  - math500
+  - humaneval
+  - mbpp
+
+# ── Evaluation settings ──────────────────────────────────────────────────────
+gsm8k:
+  num_shots: 8
+  max_new_tokens: 512
+  batch_size: 4
+
+math500:
+  num_shots: 4
+  max_new_tokens: 1024
+  batch_size: 2
+
+humaneval:
+  num_shots: 0
+  max_new_tokens: 512
+  num_samples_per_problem: 1
+  pass_k: [1]
+
+mbpp:
+  num_shots: 3
+  max_new_tokens: 512
+  pass_k: [1]
+
+# ── Generation settings ───────────────────────────────────────────────────────
+generation:
+  do_sample: false          # Greedy decoding for benchmarks
+  temperature: 1.0
+  top_p: 1.0
+  repetition_penalty: 1.0
+
+# ── Throughput measurement ────────────────────────────────────────────────────
+measure_throughput: true
+measure_vram: true
+warmup_steps: 5

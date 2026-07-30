@@ -1,0 +1,78 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# QLoRA SFT Training Configuration
+# Optimized for Google Colab Free Tier (T4, 15GB VRAM)
+# ══════════════════════════════════════════════════════════════════════════════
+
+mode: sft_qlora   # Options: sft_qlora, sft_full, dpo, orpo, grpo
+
+# ── LoRA Configuration ──────────────────────────────────────────────────────
+lora:
+  r: 16                  # LoRA rank
+  lora_alpha: 32         # Scaling factor (alpha/r = 2.0 is common)
+  lora_dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules:        # Which projections to apply LoRA to
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  # Note: We target FFN projections too since MoE FFN is key for reasoning
+
+# ── 4-bit Quantization (QLoRA) ──────────────────────────────────────────────
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"          # NF4 > int4 for LLMs
+  bnb_4bit_compute_dtype: "bfloat16"   # Use bf16 on A100, fp16 on T4
+  bnb_4bit_use_double_quant: true      # Nested quantization saves ~0.4 bits/param
+
+# ── HuggingFace TrainingArguments ───────────────────────────────────────────
+args:
+  # Memory-efficient settings for T4
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8      # Effective batch = 8
+  gradient_checkpointing: true
+
+  # Optimizer
+  optim: "paged_adamw_32bit"          # Paged optimizer saves VRAM
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Training length
+  num_train_epochs: 1
+  max_steps: -1                        # -1 = use num_train_epochs
+
+  # Logging
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 200
+  save_total_limit: 3                  # Keep only 3 checkpoints (disk space)
+
+  # Sequence
+  max_seq_length: 2048                 # 2048 is safe on T4 for 4B model
+  packing: true                        # Pack sequences to remove padding waste
+
+  # Output
+  output_dir: ${checkpoint_dir}
+  overwrite_output_dir: true
+
+  # Precision
+  fp16: false                          # Will be overridden by compute_dtype
+  bf16: false                          # Will be overridden by compute_dtype
+
+  # Misc
+  seed: ${seed}
+  data_seed: ${seed}
+  report_to: "tensorboard"            # "wandb" if use_wandb=true
+  group_by_length: false              # Disable if using packing
+
+  # Colab-specific: frequent saves in case of runtime disconnect
+  save_safetensors: true
+  resume_from_checkpoint: true        # Auto-resume from latest checkpoint

@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Vasudha Default Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+# This is the root config. Hydra composes this with sub-configs.
+#
+# Usage:
+#   python scripts/train_sft.py model=qwen3_4b training=sft_qlora
+#   python scripts/train_sft.py model=qwen3_8b training=sft_qlora data=math_mix
+
+defaults:
+  - model: qwen3_4b
+  - training: sft_qlora
+  - data: math_reasoning
+  - eval: standard
+  - _self_
+
+# ── Output directories ─────────────────────────────────────────────────────────
+output_dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
+log_dir: ${output_dir}/logs
+checkpoint_dir: ${output_dir}/checkpoints
+
+# ── Experiment tracking ────────────────────────────────────────────────────────
+experiment:
+  name: vasudha_experiment
+  project: vasudha
+  tags: []
+  use_wandb: false
+  use_tensorboard: true
+
+# ── Hardware ────────────────────────────────────────────────────────────────────
+hardware:
+  # Auto-detect dtype based on GPU (bf16 on A100, fp16 on T4)
+  compute_dtype: auto
+  # Enable gradient checkpointing (essential for T4)
+  gradient_checkpointing: true
+  # Number of gradient accumulation steps
+  gradient_accumulation_steps: 8
+  # Maximum VRAM warning threshold (%)
+  vram_warning_threshold_pct: 85.0
+
+# ── Seed ────────────────────────────────────────────────────────────────────────
+seed: 42

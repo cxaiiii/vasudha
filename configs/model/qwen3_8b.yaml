@@ -1,0 +1,74 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Vasudha Qwen3-8B Model Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+# Architecture matching Qwen3-8B (8.19B parameters, dense backbone)
+# Enhanced with Vasudha's hybrid attention and sparse MoE.
+#
+# Colab T4 memory estimates:
+#   - 4-bit QLoRA: ~5.5GB VRAM (base) + ~0.5GB (LoRA adapters)
+#   - Full fp16: NOT feasible on T4 (OOM)
+#   - Recommended: QLoRA with batch_size=1, grad_accum=16
+
+# ── HuggingFace base model (for weight loading) ────────────────────────────────
+hf_model_name: "Qwen/Qwen3-8B"
+
+# ── Vasudha architecture ───────────────────────────────────────────────────────
+vasudha_config:
+  model_type: vasudha
+  vocab_size: 151936
+
+  # Core dimensions (matching Qwen3-8B)
+  hidden_size: 4096
+  intermediate_size: 14336
+  num_hidden_layers: 36
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  head_dim: 128
+
+  # Position embeddings
+  max_position_embeddings: 32768
+  rope_theta: 1000000.0
+  rope_scaling: null
+
+  # Normalization
+  rms_norm_eps: 1.0e-6
+  attention_bias: false
+  qk_norm: true
+
+  # ── Hybrid Attention (3:1 GLA:GQA) ─────────────────────────────────────────
+  attention_type: hybrid
+  hybrid_pattern:
+    - gla
+    - gla
+    - gla
+    - sdpa
+  sliding_window_size: 4096
+
+  # ── Sparse MoE (every other layer) ─────────────────────────────────────────
+  use_moe: true
+  num_experts: 64
+  num_experts_per_tok: 2
+  moe_intermediate_size: 14336
+  moe_layers: null
+
+  router_aux_loss_coef: 0.001
+  router_z_loss_coef: 0.0001
+  router_jitter_noise: 0.0
+  expert_capacity_factor: 1.25
+
+  # ── Adaptive routing ─────────────────────────────────────────────────────────
+  use_adaptive_routing: false
+  adaptive_routing_min_k: 1
+  adaptive_routing_max_k: 4
+
+  # ── Reasoning controller ─────────────────────────────────────────────────────
+  use_reasoning_controller: false
+
+  # ── Output ───────────────────────────────────────────────────────────────────
+  tie_word_embeddings: false
+  initializer_range: 0.02
+  use_cache: true
+
+  bos_token_id: 151643
+  eos_token_id: 151645
+  pad_token_id: null
