@@ -2,7 +2,7 @@ import json
 import re
 from typing import Optional
 from datasets import load_dataset
-from .metrics import BenchmarkResult, MetricsCollector
+from ..metrics import BenchmarkResult, MetricsCollector
 import time
 from datetime import datetime
 import torch
@@ -26,7 +26,7 @@ class GSM8KBenchmark:
         self.max_new_tokens = max_new_tokens
         
     def load_dataset(self):
-        return load_dataset("gsm8k", "main", split="test")
+        return load_dataset("openai/gsm8k", "main", split="test")
         
     def format_prompt(self, question: str, num_shots: int = 8) -> str:
         prompt = ""

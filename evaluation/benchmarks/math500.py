@@ -1,7 +1,7 @@
 import json
 import re
 from typing import Optional
-from .metrics import BenchmarkResult, MetricsCollector
+from ..metrics import BenchmarkResult, MetricsCollector
 import time
 import torch
 

@@ -3,7 +3,7 @@ import random
 import torch
 import numpy as np
 from typing import Optional
-from .metrics import BenchmarkResult, MetricsCollector
+from ..metrics import BenchmarkResult, MetricsCollector
 
 class NeedleBenchmark:
     """Needle-in-Haystack test for long context retrieval."""

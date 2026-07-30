@@ -516,18 +516,34 @@ class VasudhaModel(VasudhaPreTrainedModel):
 
         batch_size, seq_len, _ = inputs_embeds.shape
 
+        # ── Convert DynamicCache to list-of-tuples ─────────────────────────────
+        # Newer transformers passes a DynamicCache object during generate().
+        # Convert it once here so all downstream code can use list indexing.
+        cache_len = 0
+        if past_key_values is not None:
+            try:
+                from transformers.cache_utils import DynamicCache
+                if isinstance(past_key_values, DynamicCache):
+                    cache_len = past_key_values.get_seq_length()
+                    num_cached_layers = len(past_key_values.layers)
+                    past_key_values_list: list = []
+                    for layer_idx in range(len(self.layers)):
+                        if layer_idx < num_cached_layers and past_key_values.layers[layer_idx].is_initialized:
+                            past_key_values_list.append(
+                                (past_key_values.layers[layer_idx].keys,
+                                 past_key_values.layers[layer_idx].values)
+                            )
+                        else:
+                            past_key_values_list.append(None)
+                    past_key_values = past_key_values_list
+                else:
+                    # Legacy list-of-tuples format.
+                    cache_len = self._real_kv_cache_len(past_key_values)
+            except ImportError:
+                pass
+
         # ── Position IDs ───────────────────────────────────────────────────────
         if position_ids is None:
-            cache_len = 0
-            if past_key_values is not None:
-                # Get cache length from first non-None cache entry
-                for past in past_key_values:
-                    if past is not None:
-                        # For GLA: state shape (B, Hkv, d, d), cache_len from seq context
-                        # For GQA: cache shape (B, Hkv, L_cache, d_head)
-                        if past[0].dim() == 4 and past[0].shape[2] > 1:
-                            cache_len = past[0].shape[2]
-                        break
             position_ids = torch.arange(
                 cache_len,
                 cache_len + seq_len,
@@ -610,6 +626,30 @@ class VasudhaModel(VasudhaPreTrainedModel):
             attentions=all_self_attentions,
         )
 
+    def _real_kv_cache_len(self, past_key_values: list) -> int:
+        """
+        Cached sequence length of the first layer that actually keeps one.
+
+        Cannot be inferred from tensor shape alone: GLA's recurrent state is
+        `(batch, kv_heads, head_dim, head_dim)` — also rank 4, so a naive
+        `dim() == 4` check mistakes it for a real (key, value) cache and reads
+        `head_dim` off dim 2 as if it were a sequence length. head_dim is a
+        small constant (commonly < the actual cached length), so this doesn't
+        merely give a wrong number — it silently truncates the attention mask
+        below the SDPA layer's real key length, which surfaces during
+        multi-step generation as a shape mismatch in scaled_dot_product_attention.
+        The per-layer attention type from config, not tensor shape, is the
+        only reliable discriminator.
+        """
+        for i, past in enumerate(past_key_values):
+            if past is None:
+                continue
+            if self.config.get_attention_type_for_layer(i) == "gla":
+                continue
+            if isinstance(past, (tuple, list)) and past[0] is not None and hasattr(past[0], "shape"):
+                return int(past[0].shape[2])
+        return 0
+
     def _prepare_attention_mask(
         self,
         attention_mask: Optional[torch.Tensor],
@@ -639,10 +679,7 @@ class VasudhaModel(VasudhaPreTrainedModel):
 
         total_len = seq_len
         if past_key_values is not None:
-            for past in past_key_values:
-                if past is not None and past[0].dim() == 4 and past[0].shape[2] > 1:
-                    total_len += past[0].shape[2]
-                    break
+            total_len += self._real_kv_cache_len(past_key_values)
 
         # Build causal mask
         device = inputs_embeds.device
@@ -837,6 +874,103 @@ class VasudhaForCausalLM(VasudhaPreTrainedModel, GenerationMixin):
             attentions=outputs.attentions,
         )
 
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 512,
+        do_sample: bool = False,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        eos_token_id: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        **kwargs: Any,
+    ) -> torch.LongTensor:
+        """
+        Self-contained greedy/sampling loop, bypassing GenerationMixin.generate().
+
+        Vasudha's per-layer cache is heterogeneous by construction: SDPA layers
+        cache (key, value) tensors shaped (batch, heads, seq, head_dim), GLA
+        layers cache a single recurrent-state tensor with no such seq axis.
+        transformers' Cache classes (DynamicCache and friends) assume every
+        layer's cache has the same shape and can be stacked/indexed uniformly,
+        so GenerationMixin.generate() — which in current transformers requires
+        past_key_values to be a Cache instance — cannot represent this model's
+        cache at all and fails inside its own bookkeeping (surfacing as an
+        opaque 'NoneType' object has no attribute 'dim'). This loop drives the
+        model with the plain list-of-tuples cache format forward() already
+        produces and consumes, which scripts/diagnose_conversion.py verified
+        byte-for-byte against stock Qwen3.
+
+        Supports exactly what the evaluation benchmarks use: a single prompt
+        per call, greedy or temperature/top-p sampling, EOS-stopping. Not a
+        general replacement for GenerationMixin (no beam search, no
+        num_return_sequences).
+        """
+        self.eval()
+        device = input_ids.device
+        batch_size = input_ids.shape[0]
+
+        if eos_token_id is None:
+            eos_token_id = getattr(self.config, "eos_token_id", None)
+        if isinstance(eos_token_id, (list, tuple)):
+            eos_token_id = eos_token_id[0] if eos_token_id else None
+        if pad_token_id is None:
+            pad_token_id = getattr(self.config, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = eos_token_id if eos_token_id is not None else 0
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        generated = input_ids
+        step_input_ids = input_ids
+        past_key_values = None
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for _ in range(max_new_tokens):
+            outputs = self(
+                input_ids=step_input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+            next_token_logits = outputs.logits[:, -1, :]
+            past_key_values = outputs.past_key_values
+
+            if do_sample:
+                probs = torch.softmax(next_token_logits / max(temperature, 1e-5), dim=-1)
+                if top_p < 1.0:
+                    sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+                    cum = torch.cumsum(sorted_probs, dim=-1)
+                    cutoff = cum - sorted_probs > top_p
+                    sorted_probs = sorted_probs.masked_fill(cutoff, 0.0)
+                    probs = torch.zeros_like(probs).scatter(-1, sorted_idx, sorted_probs)
+                    probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            else:
+                next_token = next_token_logits.argmax(dim=-1)
+
+            if eos_token_id is not None:
+                next_token = torch.where(
+                    finished, torch.full_like(next_token, pad_token_id), next_token
+                )
+
+            generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=-1)
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones((batch_size, 1))], dim=-1
+            )
+            step_input_ids = next_token.unsqueeze(-1)
+
+            if eos_token_id is not None:
+                finished = finished | (next_token == eos_token_id)
+                if bool(finished.all()):
+                    break
+
+        return generated
+
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor,
@@ -853,9 +987,17 @@ class VasudhaForCausalLM(VasudhaPreTrainedModel, GenerationMixin):
         (not the entire sequence) for efficiency.
         """
         # If cache exists, only process the last new token
-        if past_key_values is not None and past_key_values[0] is not None:
-            # For GQA: cache shape is (B, Hkv, L_cache, d_head)
-            # Only pass the last input_id
+        has_cache = False
+        if past_key_values is not None:
+            try:
+                from transformers.cache_utils import DynamicCache
+                if isinstance(past_key_values, DynamicCache):
+                    has_cache = past_key_values.get_seq_length() > 0
+                else:
+                    has_cache = past_key_values[0] is not None
+            except (ImportError, TypeError, IndexError):
+                has_cache = False
+        if has_cache:
             input_ids = input_ids[:, -1:]
 
         position_ids = kwargs.get("position_ids", None)

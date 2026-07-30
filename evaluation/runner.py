@@ -1,4 +1,5 @@
 import os
+import traceback
 from typing import Optional, List, Dict
 from .metrics import BenchmarkResult
 from .benchmarks.gsm8k import GSM8KBenchmark
@@ -22,6 +23,7 @@ class EvaluationRunner:
         self,
         benchmarks: Optional[List[str]] = None,
         output_dir: Optional[str] = None,
+        max_samples: Optional[int] = None,
     ) -> Dict[str, BenchmarkResult]:
         """Run all specified benchmarks. Saves results to output_dir if given."""
         targets = benchmarks or self.benchmarks
@@ -30,10 +32,15 @@ class EvaluationRunner:
         for b in targets:
             try:
                 print(f"Running benchmark: {b}")
-                res = self.run_single(b)
+                res = self.run_single(b, max_samples=max_samples)
                 results[b] = res
             except Exception as e:
+                # Bare str(e) hid exactly which line failed on the last crash
+                # ('NoneType' object has no attribute 'dim' — no file, no
+                # number). Print the full traceback so the next failure is
+                # diagnosable from one log instead of a guessing game.
                 print(f"Error running benchmark {b}: {e}")
+                traceback.print_exc()
                 
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
@@ -45,15 +52,15 @@ class EvaluationRunner:
             
         return results
         
-    def run_single(self, benchmark: str, **kwargs) -> BenchmarkResult:
+    def run_single(self, benchmark: str, max_samples: Optional[int] = None, **kwargs) -> BenchmarkResult:
         """Run a single benchmark by name."""
         if benchmark == "gsm8k":
             bench = GSM8KBenchmark(**kwargs)
-            return bench.evaluate(self.model, self.tokenizer, batch_size=self.batch_size)
+            return bench.evaluate(self.model, self.tokenizer, batch_size=self.batch_size, max_samples=max_samples)
         elif benchmark == "math500":
             from .benchmarks.math500 import Math500Benchmark
             bench = Math500Benchmark(**kwargs)
-            return bench.evaluate(self.model, self.tokenizer, batch_size=self.batch_size)
+            return bench.evaluate(self.model, self.tokenizer, batch_size=self.batch_size, max_samples=max_samples)
         else:
             raise NotImplementedError(f"Benchmark {benchmark} runner integration is pending.")
             

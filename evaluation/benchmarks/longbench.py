@@ -1,7 +1,7 @@
 import time
 from typing import Optional
 import torch
-from .metrics import BenchmarkResult, MetricsCollector
+from ..metrics import BenchmarkResult, MetricsCollector
 
 class LongBenchBenchmark:
     """LongBench evaluation for long-context capabilities."""

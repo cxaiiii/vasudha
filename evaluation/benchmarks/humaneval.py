@@ -4,7 +4,7 @@ import os
 import time
 from typing import Optional
 from datasets import load_dataset
-from .metrics import BenchmarkResult, MetricsCollector
+from ..metrics import BenchmarkResult, MetricsCollector
 import torch
 
 class HumanEvalBenchmark:
