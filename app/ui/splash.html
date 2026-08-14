@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vasudha</title>
+<style>
+  :root {
+    --paper:   #FDF0E4;
+    --saffron: #F93E00;
+    --forest:  #2C7430;
+    --tan:     #BC9271;
+    --ink:     #3A2A1E;
+    --ink-soft:#7A6252;
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--paper);
+    font-family: var(--font);
+    color: var(--ink);
+    user-select: none;
+    cursor: default;
+  }
+
+  #wrap {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(188, 146, 113, 0.5);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--paper);
+  }
+
+  /* `contain`, not `cover`. The illustration is 4:3 with a large pale sky and
+     the subject along the bottom edge; cover cropped to a band that was almost
+     entirely empty cream, so the splash looked blank. contain shows all of it,
+     and because the artwork's own background is the same cream as the window,
+     the letterboxing is invisible. */
+  #art {
+    flex: 1;
+    min-height: 0;
+    background: var(--paper) url("assets/splash.png") center center / contain no-repeat;
+    animation: settle 1400ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
+  }
+  @keyframes settle {
+    from { opacity: 0; transform: scale(1.04); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  #bar {
+    flex: none;
+    padding: 14px 20px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid rgba(188, 146, 113, 0.32);
+    background: var(--paper);
+  }
+
+  #name {
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  #name em {
+    font-style: normal;
+    color: var(--saffron);
+  }
+
+  #status {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-align: right;
+    animation: fade 200ms ease both;
+  }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+  /* Indeterminate sweep. There is no honest percentage for "load a model and
+     probe a server", so this does not pretend to have one. */
+  #track {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 3px;
+    background: rgba(188, 146, 113, 0.26);
+    overflow: hidden;
+  }
+  #fill {
+    height: 100%;
+    width: 36%;
+    background: linear-gradient(90deg, var(--forest), var(--saffron));
+    border-radius: 999px;
+    animation: sweep 1250ms cubic-bezier(0.5, 0, 0.5, 1) infinite;
+  }
+  @keyframes sweep {
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(320%); }
+  }
+
+  #ver { font-size: 11px; color: var(--tan); }
+
+  @media (prefers-reduced-motion: reduce) {
+    #art { animation: none; }
+    #fill { animation-duration: 3s; }
+  }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="art"></div>
+    <div id="bar">
+      <div>
+        <div id="name"><em>V</em>asudha</div>
+        <div id="ver">runs on your machine · nothing leaves it</div>
+      </div>
+      <div id="status">Starting…</div>
+    </div>
+    <div id="track"><div id="fill"></div></div>
+  </div>
+
+<script>
+  /* Python calls this as boot progresses, so the line reflects real work
+     rather than a scripted sequence of reassuring words. */
+  window.splash = {
+    setStatus(text) {
+      const el = document.getElementById('status');
+      el.style.animation = 'none';
+      void el.offsetWidth;
+      el.style.animation = null;
+      el.textContent = text;
+    }
+  };
+</script>
+</body>
+</html>

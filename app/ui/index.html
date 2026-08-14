@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vasudha</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="shell">
+
+  <aside id="sidebar">
+    <div id="brand" class="pywebview-drag-region">
+      <!-- assets/monogram.png; the span shows if the file is absent so a
+           missing asset degrades to a plain wordmark instead of a broken icon -->
+      <img id="brand-img" src="assets/monogram.png" alt="Vasudha"
+           onerror="this.style.display='none';document.getElementById('brand-fallback').style.display='block'">
+      <span id="brand-fallback" class="fallback" style="display:none">V</span>
+    </div>
+
+    <div class="rail-tabs">
+      <button class="rail-tab active" data-rail="chats">RECENT CHATS</button>
+      <button class="rail-tab" data-rail="artifacts">ARTIFACTS</button>
+    </div>
+    <div id="chat-list"></div>
+    <div id="artifact-list" hidden></div>
+
+    <div id="sidebar-foot">
+      <button id="new-chat">+ New chat</button>
+    </div>
+  </aside>
+
+  <main id="main">
+
+    <div id="titlebar">
+      <div id="backend-badge" title="Which engine is answering, and how fast">
+        <span class="dot"></span><span id="backend-text">starting…</span>
+      </div>
+      <button id="settings-btn" title="Settings">&#9881;</button>
+      <button class="win-btn" id="btn-min" title="Minimise">&#8722;</button>
+      <button class="win-btn" id="btn-close" title="Close">&#10005;</button>
+    </div>
+
+    <div id="thread">
+      <div id="thread-inner">
+
+        <div id="empty">
+          <img src="assets/splash.png" alt=""
+               onerror="this.style.display='none'">
+          <h1>Ask, and it will actually compute the answer.</h1>
+          <p>
+            Vasudha runs entirely on this machine. Nothing you type leaves it.
+            Every number in an answer is calculated in a real Python sandbox —
+            you can open the working and check it.
+          </p>
+          <div class="chips">
+            <button class="chip" data-q="A steel cantilever beam is 2 m long, 50 mm wide and 100 mm deep, with a 5 kN point load at the free end. E = 200 GPa. What is the maximum tip deflection in mm?">Cantilever deflection</button>
+            <button class="chip" data-q="Water at 998 kg/m^3 and 1.002e-3 Pa*s flows at 2 m/s through a 25 mm pipe. Compute the Reynolds number and say whether the flow is turbulent.">Reynolds number</button>
+            <button class="chip" data-q="An RC low-pass filter uses R = 4.7 kOhm and C = 100 nF. What is the -3 dB cutoff frequency?">RC cutoff frequency</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div id="composer">
+      <div id="composer-inner">
+        <textarea id="input" rows="1" placeholder="Ask a question…"></textarea>
+        <button id="send" title="Send (Enter)">&#8594;</button>
+      </div>
+    </div>
+
+    <div id="firstrun">
+      <img src="assets/splash.png" alt="" onerror="this.style.display='none'">
+      <h2 id="fr-title">Set up Vasudha</h2>
+      <p id="fr-body">
+        Vasudha needs its model file once. It is about 2.3&nbsp;GB and is stored
+        on this machine — after this, the app works with no internet at all.
+      </p>
+      <div class="progress-track"><div class="progress-fill" id="dl-bar"></div></div>
+      <div id="dl-detail"></div>
+      <!-- Errors here, not in the chat: the chat is behind this overlay, so a
+           failure written there is invisible and looks like a dead button. -->
+      <div id="dl-error"></div>
+      <div style="display:flex;gap:12px;align-items:center">
+        <button class="btn-primary" id="dl-start">Download model</button>
+        <button class="btn-ghost" id="dl-locate">I already have the file</button>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Preview canvas. Hidden until document_tool produces something, so the
+       chat keeps the full width until there is a deliverable to show. -->
+  <section id="canvas" aria-hidden="true">
+    <div id="canvas-head">
+      <span id="canvas-kind">DOC</span>
+      <span id="canvas-title">Document</span>
+      <button class="canvas-btn" id="canvas-toggle" title="Switch between preview and source">Source</button>
+      <button class="canvas-btn" id="canvas-save" title="Save a copy">Save</button>
+      <button class="canvas-btn" id="canvas-close" title="Close preview">&#10005;</button>
+    </div>
+    <div id="canvas-warning">
+      <span>&#9888;</span>
+      <span><strong>Unverified.</strong> No source page was opened for this — the figures
+      come from the model's recall, not a checked source. Treat them as a draft.</span>
+    </div>
+    <div id="canvas-body">
+      <div id="canvas-render"></div>
+      <pre id="canvas-source"><code></code></pre>
+    </div>
+  </section>
+</div>
+
+<!-- Frameless windows have no OS resize border; these drive it via the bridge. -->
+<div class="rz rz-n"  data-edge="n"></div>
+<div class="rz rz-s"  data-edge="s"></div>
+<div class="rz rz-w"  data-edge="w"></div>
+<div class="rz rz-e"  data-edge="e"></div>
+<div class="rz rz-nw" data-edge="nw"></div>
+<div class="rz rz-ne" data-edge="ne"></div>
+<div class="rz rz-sw" data-edge="sw"></div>
+<div class="rz rz-se" data-edge="se"></div>
+
+<div id="scrim"></div>
+
+<aside id="settings" aria-hidden="true">
+  <div id="settings-head">
+    <h2>Settings</h2>
+    <button id="settings-close" title="Close">&#10005;</button>
+  </div>
+
+  <div id="settings-body">
+
+    <div class="set-group">
+      <h3>Personality</h3>
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">How Vasudha talks</span>
+          <span class="hint">Changes tone and detail only. Every persona still computes
+          numbers with Python and shows the working.</span>
+        </span>
+        <select id="s-persona"></select>
+      </div>
+      <div class="set-row stack">
+        <span class="set-label">
+          <span class="name">Write your own</span>
+          <span class="hint">Personas are plain JSON files. Edit one, or add a new file,
+          then restart Vasudha — it will appear here and in the first-run picker.</span>
+        </span>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn-ghost" id="s-open-personas">Open personas folder</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>Engine</h3>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Backend</span>
+          <span class="hint">Ollama uses your graphics card and is much faster. Built-in needs no install but runs on the CPU.</span>
+        </span>
+        <select id="s-backend">
+          <option value="auto">Automatic</option>
+          <option value="ollama">Ollama</option>
+          <option value="builtin">Built-in</option>
+        </select>
+      </div>
+
+      <div class="set-row stack">
+        <span class="set-label">
+          <span class="name">Model file</span>
+          <span class="hint">A .gguf on this machine, used by the built-in backend.</span>
+        </span>
+        <input type="text" id="s-model-path" placeholder="(none selected)" spellcheck="false">
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn-ghost" id="s-browse">Choose file…</button>
+        </div>
+      </div>
+
+      <div class="set-row stack">
+        <span class="set-label">
+          <span class="name">Ollama address</span>
+          <span class="hint">Only change this if Ollama runs on another port or machine.</span>
+        </span>
+        <input type="text" id="s-ollama-url" spellcheck="false">
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>Answers</h3>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Temperature</span>
+          <span class="hint">Lower is steadier and more repeatable. 0 gives the same answer every time.</span>
+        </span>
+        <input type="range" id="s-temperature" min="0" max="1.5" step="0.05">
+        <span class="set-val" id="s-temperature-val">0.6</span>
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Top-p</span>
+          <span class="hint">How much of the probability mass to sample from.</span>
+        </span>
+        <input type="range" id="s-top-p" min="0.1" max="1" step="0.05">
+        <span class="set-val" id="s-top-p-val">0.9</span>
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Reply length limit</span>
+          <span class="hint">Tokens per reply. Below about 1500 the model can be cut off mid tool call, which fails the whole answer.</span>
+        </span>
+        <input type="number" id="s-num-predict" min="256" max="16384" step="256">
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Context window</span>
+          <span class="hint">How much conversation the model keeps in view. Larger uses more memory.</span>
+        </span>
+        <input type="number" id="s-num-ctx" min="2048" max="131072" step="2048">
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>Tools</h3>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Code timeout</span>
+          <span class="hint">Seconds a single Python run may take before it is stopped.</span>
+        </span>
+        <input type="number" id="s-tool-timeout" min="1" max="120" step="1">
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Tool calls per answer</span>
+          <span class="hint">Upper limit before Vasudha stops and reports what it has.</span>
+        </span>
+        <input type="number" id="s-max-iterations" min="1" max="32" step="1">
+      </div>
+
+      <div class="set-note">
+        Python always runs for numeric questions. On this model, answering
+        without it scored 0 out of 6 on the built-in check; with it, 4 out of 6.
+        That is why there is no switch to turn it off.
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>Interface</h3>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Show working by default</span>
+          <span class="hint">Expand the code and output cards without clicking.</span>
+        </span>
+        <label class="switch"><input type="checkbox" id="s-open-tool-cards"><span class="track"></span><span class="thumb"></span></label>
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Show reasoning by default</span>
+          <span class="hint">Expand the model's internal notes on every reply.</span>
+        </span>
+        <label class="switch"><input type="checkbox" id="s-show-reasoning"><span class="track"></span><span class="thumb"></span></label>
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Enter sends</span>
+          <span class="hint">Off means Enter adds a line and Ctrl+Enter sends.</span>
+        </span>
+        <label class="switch"><input type="checkbox" id="s-send-on-enter"><span class="track"></span><span class="thumb"></span></label>
+      </div>
+
+      <div class="set-row">
+        <span class="set-label">
+          <span class="name">Reduce motion</span>
+          <span class="hint">Turn off transitions and entry animations.</span>
+        </span>
+        <label class="switch"><input type="checkbox" id="s-reduce-motion"><span class="track"></span><span class="thumb"></span></label>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>Data</h3>
+      <div class="set-row stack">
+        <span class="set-label">
+          <span class="name">Stored on this machine</span>
+          <span class="hint" id="s-data-path">…</span>
+        </span>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn-ghost" id="s-open-folder">Open folder</button>
+          <button class="btn-ghost" id="s-clear-history">Delete all chats</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="settings-foot">
+    <span id="settings-status">Saved</span>
+    <button class="btn-ghost" id="s-reset">Reset</button>
+    <button class="btn-primary" id="s-save">Save</button>
+  </div>
+</aside>
+
+<!-- First-run persona picker. Full screen because it is a real choice, not a
+     dialog to dismiss — and because it is the first thing anyone sees. -->
+<div id="onboard" aria-hidden="true">
+  <div id="onboard-inner">
+    <img id="onboard-mark" src="assets/monogram.png" alt=""
+         onerror="this.style.display='none'">
+    <h1>Choose how Vasudha talks to you</h1>
+    <p class="onboard-sub">
+      This changes its voice, not its accuracy. Every persona still computes
+      numbers in a real sandbox and shows you the working. You can change this
+      any time in Settings.
+    </p>
+    <div id="persona-grid"></div>
+    <div id="onboard-foot">
+      <span id="onboard-hint">Pick one to continue</span>
+      <button class="btn-primary" id="onboard-go" disabled>Start using Vasudha</button>
+    </div>
+    <p class="onboard-credit">Vasudha — built by Chaitanya, an independent developer.</p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

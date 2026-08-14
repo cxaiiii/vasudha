@@ -1,0 +1,44 @@
+# Vasudha 4B v2: same base as the v1 Modelfile, retrained on the stage-2 mix
+# plus the new reasoning-trace + tool-use corpus (data/vasudha-v2-corpus —
+# physics/engineering/programming/bio/metallurgy/CAD reasoning + real
+# search/python/fetch tool trajectories). Template/behavior notes below are
+# copied from the v1 Modelfile since neither the chat format nor the
+# pre-closed-<think> default changed in this training run.
+FROM ./vasudha-leaprunning-4b-v2-Q4_K_M.gguf
+
+# Ollama could not auto-derive a chat template from this GGUF (too new an
+# architecture for its parser) and silently fell back to TEMPLATE
+# {{ .Prompt }} — raw, unwrapped text with no <|im_start|>/<|im_end|> turn
+# structure and no stop token. This reproduces the ChatML-style format from
+# the actual chat_template.jinja this model was trained and converted with.
+#
+# The empty <think></think> block on the assistant turn is deliberate, not
+# a template quirk: this model's template opens an *unclosed* <think> tag by
+# default (forcing reasoning mode on every reply) unless the turn explicitly
+# closes it. Pre-closing it here keeps direct-answer the deployed default.
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+SYSTEM """You are Vasudha, an engineering-focused AI assistant. Identify governing equations, state assumptions, use Python or approved tools when useful, interpret results, validate them, and discuss limitations. Never claim to have executed code unless a tool result is provided. When reasoning is enabled, keep internal reasoning separate from the final answer."""
+
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+# Hermes Agent requires a minimum 64K reported context window to connect at
+# all (32768 was rejected outright) — 65536 clears that bar with the
+# smallest possible VRAM increase, which matters on a 6GB card already
+# using ~3.9GB at 32K context. The hybrid architecture (24/32 layers
+# linear-attention) keeps this cheaper than a dense model would need, but
+# VRAM headroom here is real, not unlimited — watch for OOM before pushing
+# higher (e.g. toward the 131072 "ultra" preset used elsewhere).
+PARAMETER num_ctx 65536
+PARAMETER num_predict 768

@@ -1,11 +1,18 @@
 import json
+import os
 import re
 from typing import Optional
-from datasets import load_dataset
 from ..metrics import BenchmarkResult, MetricsCollector
 import time
 from datetime import datetime
 import torch
+
+# The 1319-example test split, snapshotted to evaluation/data/gsm8k_test.jsonl.
+# load_dataset() pulled this from the Hub before, and huggingface_hub's HTTP
+# calls don't take a timeout kwarg from us, so a stalled connection in the
+# Modal container hung silently for 30+ minutes with no error. Shipping the
+# data with the repo removes the network dependency entirely.
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "gsm8k_test.jsonl")
 
 class GSM8KBenchmark:
     """8-shot chain-of-thought evaluation on GSM8K."""
@@ -26,7 +33,8 @@ class GSM8KBenchmark:
         self.max_new_tokens = max_new_tokens
         
     def load_dataset(self):
-        return load_dataset("openai/gsm8k", "main", split="test")
+        with open(_DATA_PATH, "r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
         
     def format_prompt(self, question: str, num_shots: int = 8) -> str:
         prompt = ""
@@ -62,27 +70,52 @@ class GSM8KBenchmark:
     ) -> BenchmarkResult:
         ds = self.load_dataset()
         if max_samples:
-            ds = ds.select(range(max_samples))
+            ds = ds[:max_samples]
             
         collector = MetricsCollector()
         start_time = time.time()
-        
+        n = len(ds)
+
         # Simplified batch evaluation logic
-        for item in ds:
+        for i, item in enumerate(ds):
             prompt = self.format_prompt(item["question"], self.num_shots)
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            
+            # Training data was entirely <|im_start|>user...<|im_end|> chat
+            # turns (see ChatFormatter._format_qwen3) — a bare completion
+            # prompt is out-of-distribution for this model regardless of how
+            # well training went, and alone accounts for near-random scores.
+            chat_text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            inputs = tokenizer(chat_text, return_tensors="pt", add_special_tokens=False).to(model.device)
+
             t0 = time.time()
             with torch.no_grad():
                 outputs = model.generate(**inputs, max_new_tokens=self.max_new_tokens)
             latency_ms = (time.time() - t0) * 1000
-            
+
             generated = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
             pred_ans = self.extract_answer(generated)
             ref_ans = self.extract_answer(item["answer"])
-            
+
             collector.record_sample(str(pred_ans), str(ref_ans), latency_ms)
-            
+
+            if i < 3:
+                print(
+                    f"  [gsm8k {i + 1} sample] pred={pred_ans} ref={ref_ans} "
+                    f"raw={generated[:200]!r}",
+                    flush=True,
+                )
+
+            elapsed = time.time() - start_time
+            eta_min = (elapsed / (i + 1)) * (n - i - 1) / 60
+            print(
+                f"  [gsm8k {i + 1}/{n}] {latency_ms / 1000:.1f}s/sample, "
+                f"eta {eta_min:.1f} min",
+                flush=True,
+            )
+
         res = collector.summarize()
         res.benchmark = "GSM8K"
         res.model_name = getattr(model, "name_or_path", "unknown")

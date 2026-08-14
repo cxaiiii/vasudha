@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
         help="Base model for a LoRA adapter. Defaults to the path recorded in "
              "adapter_config.json, which is usually correct.",
     )
+    parser.add_argument(
+        "--attention-override",
+        choices=["checkpoint", "sdpa"],
+        default="checkpoint",
+        help="Instantiate a compatible attention implementation for adapters trained with an override.",
+    )
     return parser.parse_args()
 
 
@@ -129,6 +135,15 @@ def load_model_and_tokenizer(args: argparse.Namespace):
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
+    def with_attention_override(base: str) -> dict:
+        if args.attention_override == "checkpoint":
+            return load_kwargs
+        from vasudha.models.config import VasudhaConfig
+        config = VasudhaConfig.from_pretrained(base)
+        config.attention_type = args.attention_override
+        config.use_cache = False
+        return {**load_kwargs, "config": config}
+
     if os.path.exists(adapter_cfg):
         with open(adapter_cfg, "r", encoding="utf-8") as f:
             base = args.base_path or json.load(f).get("base_model_name_or_path")
@@ -138,7 +153,7 @@ def load_model_and_tokenizer(args: argparse.Namespace):
                 f"(got {base!r}). Pass --base_path pointing at the converted checkpoint."
             )
         logger.info(f"LoRA adapter detected — loading base '{base}'")
-        model = VasudhaForCausalLM.from_pretrained(base, **load_kwargs)
+        model = VasudhaForCausalLM.from_pretrained(base, **with_attention_override(base))
 
         from peft import PeftModel
 
@@ -149,8 +164,9 @@ def load_model_and_tokenizer(args: argparse.Namespace):
         model = model.merge_and_unload()
     else:
         logger.info(f"Loading full checkpoint '{path}'")
-        model = VasudhaForCausalLM.from_pretrained(path, **load_kwargs)
+        model = VasudhaForCausalLM.from_pretrained(path, **with_attention_override(path))
 
+    model.config.use_cache = True
     model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)

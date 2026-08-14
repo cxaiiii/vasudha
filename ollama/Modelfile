@@ -1,0 +1,42 @@
+# Vasudha 4B: Qwen3.5-4B hybrid (gated-deltanet + full attention), stage-2
+# trained (reasoning mix + OpenHermes + tool-use/code-execution grounding),
+# merged and quantized to GGUF. No ADAPTER line needed — already merged.
+FROM ./vasudha-leaprunning-4b-Q4_K_M.gguf
+
+# Ollama could not auto-derive a chat template from this GGUF (too new an
+# architecture for its parser) and silently fell back to TEMPLATE
+# {{ .Prompt }} — raw, unwrapped text with no <|im_start|>/<|im_end|> turn
+# structure and no stop token, which is why "Hello" got answered with an
+# unrelated Python tutorial that ran on forever. This reproduces the
+# ChatML-style format from the actual chat_template.jinja this model was
+# trained and converted with.
+#
+# The empty <think></think> block on the assistant turn is deliberate, not
+# a template quirk: this model's template opens an *unclosed* <think> tag by
+# default (forcing reasoning mode on every reply) unless the turn explicitly
+# closes it — that default is exactly the "thinks about everything, never
+# just answers" behavior stage-2 training was meant to fix. Pre-closing it
+# here makes direct-answer the actual deployed default.
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+SYSTEM """You are Vasudha, an engineering-focused AI assistant. Identify governing equations, state assumptions, use Python or approved tools when useful, interpret results, validate them, and discuss limitations. Never claim to have executed code unless a tool result is provided. When reasoning is enabled, keep internal reasoning separate from the final answer."""
+
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+# 4096 silently truncates a multi-step search+fetch conversation — Ollama
+# evicts the oldest messages once full, so the model loses earlier fetched
+# facts without any error. 24/32 layers are linear-attention (O(1) memory
+# vs. context length), so a much larger window is cheap for this model.
+PARAMETER num_ctx 32768
+PARAMETER num_predict 768

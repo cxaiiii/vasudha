@@ -21,6 +21,7 @@ lora:
     - up_proj
     - down_proj
   # Note: We target FFN projections too since MoE FFN is key for reasoning
+  modules_to_save: null   # e.g. ["g_proj"] for hybrid attention — see lora_utils.py
 
 # ── 4-bit Quantization (QLoRA) ──────────────────────────────────────────────
 quantization:

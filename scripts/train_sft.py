@@ -119,6 +119,24 @@ def main(cfg: DictConfig) -> None:
     compute_dtype = get_compute_dtype(cfg.hardware.get("compute_dtype", "auto"))
 
     load_kwargs: dict = {"torch_dtype": compute_dtype, "device_map": {"": 0}}
+
+    # The current GLA implementation is a correctness reference with a Python
+    # loop over sequence positions.  An H100 cannot accelerate that loop, so
+    # an SDPA override is the practical training path until the chunked Triton
+    # kernel exists.  Qwen-derived q/k/v/o weights load unchanged; only the
+    # experimental GLA gate projections are omitted.
+    attention_override = cfg.model.get("attention_override", None)
+    if attention_override and attention_override != "checkpoint":
+        from vasudha.models.config import VasudhaConfig
+
+        model_config = VasudhaConfig.from_pretrained(vasudha_path)
+        model_config.attention_type = str(attention_override)
+        model_config.use_cache = False
+        load_kwargs["config"] = model_config
+        logger.warning(
+            "Overriding checkpoint attention '%s' -> '%s' for training.",
+            "hybrid", attention_override,
+        )
     if load_in_4bit or load_in_8bit:
         from transformers import BitsAndBytesConfig
 
@@ -131,6 +149,9 @@ def main(cfg: DictConfig) -> None:
         )
 
     model = VasudhaForCausalLM.from_pretrained(vasudha_path, **load_kwargs)
+    # Caches are useful only for autoregressive inference.  Keeping them during
+    # SFT wastes HBM bandwidth and activation memory on every layer.
+    model.config.use_cache = False
 
     logger.info(f"Model loaded: {model!r}")
 
@@ -149,6 +170,7 @@ def main(cfg: DictConfig) -> None:
             lora_alpha=lora_cfg.get("lora_alpha", 32),
             lora_dropout=lora_cfg.get("lora_dropout", 0.05),
             target_modules=list(lora_cfg.get("target_modules", ["q_proj", "v_proj"])),
+            modules_to_save=list(lora_cfg["modules_to_save"]) if lora_cfg.get("modules_to_save") else None,
             load_in_4bit=load_in_4bit,
             load_in_8bit=load_in_8bit,
         )
