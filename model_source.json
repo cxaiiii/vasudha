@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Where Vasudha downloads its weights on first run.",
+    "",
+    "Edit this file and restart \u2014 no rebuild needed. A copy beside Vasudha.exe,",
+    "or at %LOCALAPPDATA%\\Vasudha\\model_source.json, overrides the bundled one.",
+    "",
+    "NOT a GitHub release: assets are capped at 2.00 GiB and every quant of this",
+    "model is larger (Q3_K_M is 2.11 GiB). HuggingFace has no cap, serves over a",
+    "CDN, and supports range requests, which is what makes resuming work.",
+    "",
+    "Publish the sha256 too. A truncated 2.2 GB GGUF does not fail cleanly at",
+    "load time; verifying turns a confusing tensor error into one clear message.",
+    "Get it with:  Get-FileHash <file> -Algorithm SHA256"
+  ],
+  "url": "https://huggingface.co/cxaiiii/vasudha-4b-v3-gguf/resolve/main/vasudha-leaprunning-4b-v3-Q3_K_M.gguf?download=true",
+  "filename": "vasudha-leaprunning-4b-v3-Q3_K_M.gguf",
+  "sha256": "0a31e817bf8e7a3f9d1214ac1445648e734b3acd10ce019f02fa12b691a791c9",
+  "size_bytes": 2262063584,
+  "_example_url": "https://huggingface.co/<user>/vasudha-4b-v3-gguf/resolve/main/vasudha-leaprunning-4b-v3-Q3_K_M.gguf?download=true"
+}

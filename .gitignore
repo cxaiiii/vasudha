@@ -64,11 +64,19 @@ multirun/
 *.pth
 *.ckpt
 *.safetensors
+*.bin
 !tests/**/*.pt          # allow test fixtures
 checkpoints/
 runs/
 logs/
 wandb/
+# Local downloads of the merged/converted model — these are multi-GB
+# artifacts (9.7GB / 500MB+ each), never source, and were caught NOT being
+# excluded by the patterns above (no directory-name match, and *.bin didn't
+# exist yet) — a plain `git add .` would have staged all of it.
+vasudha-model/
+vasudha/checkpoint-*/
+local_weights.bin
 
 # Triton cache
 .triton/
@@ -81,6 +89,10 @@ triton_cache/
 # Data
 data/
 datasets/
+# Keep the Python package named ``vasudha.datasets``; the broad ``datasets/``
+# rule above is for downloaded Hugging Face data, not source code.
+!vasudha/datasets/
+!vasudha/datasets/*.py
 *.jsonl
 *.json.gz
 *.parquet
@@ -97,6 +109,21 @@ huggingface/
 *.o
 *.a
 *.lib
+
+# Packaged desktop builds.
+#
+# `dist/` and `build/` are covered by the Python rules near the top, but
+# PyInstaller cannot clean dist/Vasudha while any shell has it as a working
+# directory, so builds get redirected to dist_build/. That is 212 MB of
+# executable and bundled DLLs, and a plain `git add -A` was measured staging
+# 1523 files / 129 MB of it. Release binaries belong on a GitHub release, not
+# in the history, where they can never be removed.
+dist_build/
+*.zip
+
+# Model source config is committed as a template with an empty url; the copy
+# carrying the real download link is written by scripts/publish_model.py.
+# (model_source.json itself IS tracked — this note is here so nobody adds it.)
 
 # Profiling
 *.prof

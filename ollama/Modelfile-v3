@@ -1,0 +1,39 @@
+# Vasudha 4B v3: continued from v2 (not retrained from scratch — v2's merged
+# checkpoint was used as the base model), further trained on a 107,874-row
+# mix that adds real front-end/render_tool training data for the first time
+# (1,500 rows from HuggingFaceM4/WebSight, normalized to this project's
+# actual Tailwind CDN convention and dead-image-URL-fixed — see
+# scripts/prepare_frontend_dataset.py) plus expanded reasoning-trace and
+# tool-use coverage.
+#
+# Q3_K_M, not Q4_K_M, deliberately: v2 at Q4_K_M + the 64K context Hermes
+# Agent requires needed 5.9GB, which didn't fully fit this machine's 6GB
+# card and forced ~71% CPU offload (measured: 1m50s for a trivial reply
+# vs. 3.8s when fully on GPU). Q3_K_M's smaller base footprint (2.11GB vs
+# 2.52GB) is meant to leave enough headroom for the same 64K context to
+# actually fit in VRAM — verify this with `ollama ps` after loading, don't
+# assume the smaller quant alone fixed it.
+FROM ./vasudha-leaprunning-4b-v3-Q3_K_M.gguf
+
+# Same ChatML-style template as v1/v2 — training format didn't change.
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+SYSTEM """You are Vasudha, an engineering-focused AI assistant. Identify governing equations, state assumptions, use Python or approved tools when useful, interpret results, validate them, and discuss limitations. Never claim to have executed code unless a tool result is provided. When reasoning is enabled, keep internal reasoning separate from the final answer."""
+
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+# Baked in at 64K from the start this time — Hermes Agent hard-rejects
+# anything below that, learned the hard way on v2.
+PARAMETER num_ctx 65536
+PARAMETER num_predict 768

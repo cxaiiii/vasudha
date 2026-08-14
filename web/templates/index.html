@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vasudha 4B — Console</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0a0d;
+            --bg-elevated: #111318;
+            --bg-inset: #08090b;
+            --border: #22262e;
+            --border-bright: #3a4048;
+            --text-primary: #e8e6e0;
+            --text-secondary: #8b8f98;
+            --text-tertiary: #52565e;
+            --accent: #ff8c1a;
+            --accent-dim: #cc7015;
+            --accent-glow: rgba(255, 140, 26, 0.14);
+            --success: #4ade80;
+            --error: #f87171;
+            --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+            --font-sans: 'IBM Plex Sans', -apple-system, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: var(--font-sans);
+            background: var(--bg);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: row;
+            background-image:
+                repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 24px),
+                repeating-linear-gradient(90deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 24px),
+                radial-gradient(ellipse at 50% -10%, rgba(255,140,26,0.055), transparent 60%);
+        }
+
+        .main-panel {
+            flex: 1;
+            min-width: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .canvas-panel {
+            width: 0;
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border);
+            background: var(--bg-inset);
+            transition: width 0.28s cubic-bezier(.16,1,.3,1);
+            flex-shrink: 0;
+        }
+
+        .canvas-panel.open { width: min(50vw, 760px); }
+
+        .canvas-header {
+            padding: 0.7rem 1.1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-elevated);
+            font-family: var(--font-mono);
+            font-size: 0.72rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+        }
+
+        .canvas-close {
+            background: transparent;
+            border: none;
+            color: var(--text-tertiary);
+            font-family: var(--font-mono);
+            font-size: 0.95rem;
+            cursor: pointer;
+            padding: 0.2rem 0.5rem;
+            transition: color .15s;
+        }
+
+        .canvas-close:hover { color: var(--error); }
+
+        .canvas-frame { flex: 1; border: none; width: 100%; background: #ffffff; }
+
+        .render-card {
+            margin: 0.85rem 0;
+            padding: 0.6rem 0.9rem;
+            border-radius: 3px;
+            border: 1px solid rgba(255,140,26,0.35);
+            background: var(--accent-glow);
+            color: var(--accent);
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            letter-spacing: 0.01em;
+            cursor: pointer;
+            transition: background 0.15s;
+            display: inline-block;
+        }
+
+        .render-card:hover { background: rgba(255,140,26,0.24); }
+
+        .header {
+            padding: 1rem 1.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-elevated);
+            z-index: 10;
+        }
+
+        .header-title { display: flex; align-items: baseline; gap: 0.9rem; }
+
+        .header h1 {
+            margin: 0;
+            font-family: var(--font-mono);
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            color: var(--text-primary);
+        }
+
+        .header h1 .cursor {
+            display: inline-block;
+            width: 0.5em;
+            height: 1em;
+            background: var(--accent);
+            margin-left: 3px;
+            vertical-align: text-bottom;
+            animation: blink 1.1s steps(1) infinite;
+        }
+
+        @keyframes blink { 50% { opacity: 0; } }
+
+        .badge {
+            font-family: var(--font-mono);
+            font-size: 0.66rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+            padding: 0.18rem 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+        }
+
+        .reset-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            padding: 0.45rem 0.8rem;
+            border-radius: 2px;
+            cursor: pointer;
+            transition: border-color .15s, color .15s;
+        }
+
+        .reset-btn:hover { border-color: var(--error); color: var(--error); }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.35rem;
+            max-width: 920px;
+            margin: 0 auto;
+            width: 100%;
+            scroll-behavior: smooth;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 88%;
+            animation: rise 0.25s cubic-bezier(.16,1,.3,1) both;
+        }
+
+        @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+        .message.user { align-self: flex-end; align-items: flex-end; }
+        .message.bot { align-self: flex-start; align-items: flex-start; }
+
+        .msg-label {
+            font-family: var(--font-mono);
+            font-size: 0.66rem;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+            margin-bottom: 0.35rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .message.user .msg-label { flex-direction: row-reverse; }
+
+        .edit-btn {
+            font-family: var(--font-mono);
+            font-size: 0.63rem;
+            letter-spacing: 0.03em;
+            color: var(--text-tertiary);
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity .15s, color .15s;
+            padding: 0;
+        }
+
+        .message.user:hover .edit-btn { opacity: 1; }
+        .edit-btn:hover { color: var(--accent); }
+
+        .bubble {
+            padding: 0.85rem 1.05rem;
+            border-radius: 3px;
+            line-height: 1.58;
+            font-size: 0.94rem;
+            width: 100%;
+            border: 1px solid var(--border);
+        }
+
+        .message.user .bubble {
+            background: var(--accent-glow);
+            border-color: rgba(255,140,26,0.3);
+            color: var(--text-primary);
+        }
+
+        .message.bot .bubble {
+            background: var(--bg-elevated);
+            border-color: var(--border);
+        }
+
+        .thinking-block {
+            margin-bottom: 0.85rem;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            background: var(--bg-inset);
+            overflow: hidden;
+        }
+
+        .thinking-header {
+            padding: 0.45rem 0.85rem;
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            user-select: none;
+            transition: color .15s;
+        }
+
+        .thinking-header:hover { color: var(--text-secondary); }
+
+        .thinking-content {
+            padding: 0.85rem;
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            border-top: 1px solid var(--border);
+        }
+
+        .thinking-content.collapsed { display: none; }
+
+        .tool-call-block, .tool-output-block {
+            margin: 0.85rem 0;
+            border-radius: 3px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+        }
+
+        .tool-header {
+            background: var(--bg-inset);
+            padding: 0.4rem 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-tertiary);
+            font-size: 0.66rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tool-output-block .tool-header { color: var(--success); }
+
+        .tool-content {
+            background: var(--bg-inset);
+            padding: 0.85rem;
+            color: var(--accent);
+            white-space: pre-wrap;
+            overflow-x: auto;
+        }
+
+        .tool-output-content {
+            background: var(--bg-inset);
+            padding: 0.85rem;
+            color: var(--success);
+            white-space: pre-wrap;
+            overflow-x: auto;
+        }
+
+        .final-content { white-space: pre-wrap; }
+
+        .status-line {
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+            color: var(--text-tertiary);
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            letter-spacing: 0.02em;
+        }
+
+        .status-cursor {
+            display: inline-block;
+            width: 0.55em;
+            height: 1em;
+            background: var(--accent);
+            animation: blink 0.9s steps(1) infinite;
+        }
+
+        .input-area {
+            padding: 1rem 1.75rem 1.15rem;
+            background: var(--bg-elevated);
+            border-top: 1px solid var(--border);
+        }
+
+        .input-container {
+            max-width: 920px;
+            margin: 0 auto;
+            display: flex;
+            align-items: flex-end;
+            gap: 0.75rem;
+            background: var(--bg-inset);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.55rem 0.55rem 0.55rem 1rem;
+            transition: border-color 0.15s;
+        }
+
+        .input-container:focus-within { border-color: var(--accent); }
+
+        #userInput {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            font-size: 0.94rem;
+            outline: none;
+            resize: none;
+            line-height: 1.5;
+            max-height: 200px;
+            padding: 0.35rem 0;
+            font-weight: 400;
+        }
+
+        #userInput::placeholder { color: var(--text-tertiary); }
+
+        .send-btn {
+            background: var(--accent);
+            border: none;
+            color: #0a0a0d;
+            font-family: var(--font-mono);
+            font-weight: 600;
+            font-size: 0.76rem;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            padding: 0.6rem 1.1rem;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: opacity .15s, transform .08s;
+        }
+
+        .send-btn:hover { opacity: 0.88; }
+        .send-btn:active { transform: scale(0.96); }
+        .send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+        .hint-row {
+            max-width: 920px;
+            margin: 0.55rem auto 0;
+            display: flex;
+            justify-content: space-between;
+            font-family: var(--font-mono);
+            font-size: 0.66rem;
+            color: var(--text-tertiary);
+            letter-spacing: 0.01em;
+        }
+
+        .hint-row kbd {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 0.05rem 0.32rem;
+            font-family: var(--font-mono);
+            color: var(--text-secondary);
+        }
+
+        .chat-container::-webkit-scrollbar { width: 8px; }
+        .chat-container::-webkit-scrollbar-track { background: transparent; }
+        .chat-container::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
+
+        .header-actions { display: flex; align-items: center; gap: 1.25rem; }
+
+        .power-control { display: flex; align-items: center; gap: 0.55rem; }
+
+        .power-label {
+            font-family: var(--font-mono);
+            font-size: 0.64rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+        }
+
+        .power-segments {
+            display: flex;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .power-segment {
+            background: transparent;
+            border: none;
+            border-right: 1px solid var(--border);
+            color: var(--text-tertiary);
+            font-family: var(--font-mono);
+            font-size: 0.64rem;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            padding: 0.35rem 0.6rem;
+            cursor: pointer;
+            transition: background .15s, color .15s;
+        }
+
+        .power-segment:last-child { border-right: none; }
+        .power-segment:hover { color: var(--text-secondary); }
+        .power-segment.active { background: var(--accent-glow); color: var(--accent); }
+    </style>
+</head>
+<body>
+    <div class="main-panel">
+        <div class="header">
+            <div class="header-title">
+                <h1>Vasudha<span class="cursor"></span></h1>
+                <span class="badge">Shell · Search · Canvas</span>
+            </div>
+            <div class="header-actions">
+                <div class="power-control">
+                    <span class="power-label">Power</span>
+                    <div class="power-segments" id="powerSegments">
+                        {% for level in power_levels %}
+                        <button type="button" class="power-segment{% if level == default_power %} active{% endif %}" data-power="{{ level }}">{{ level }}</button>
+                        {% endfor %}
+                    </div>
+                </div>
+                <button class="reset-btn" onclick="resetChatMemory()">Reset / New Chat</button>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chatContainer">
+            <div class="message bot">
+                <div class="msg-label">Vasudha</div>
+                <div class="bubble">
+                    <div class="final-content">Hello! I am Vasudha, configured with concise responses, a sandboxed execution shell, live webpage rendering, and web search. How can I assist you today?</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <form class="input-container" id="chatForm">
+                <textarea id="userInput" rows="1" placeholder="Ask a question, request Python execution, a webpage, or a search..." autocomplete="off"></textarea>
+                <button type="submit" class="send-btn" id="sendBtn">Send</button>
+            </form>
+            <div class="hint-row">
+                <span><kbd>Enter</kbd> send &nbsp; <kbd>Shift+Enter</kbd> newline &nbsp; <kbd>↑</kbd> edit last</span>
+                <span><kbd>/</kbd> focus &nbsp; <kbd>Esc</kbd> stop</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="canvas-panel" id="canvasPanel">
+        <div class="canvas-header">
+            <span>Live Preview</span>
+            <button class="canvas-close" onclick="closeCanvas()">✕</button>
+        </div>
+        <iframe id="canvasFrame" class="canvas-frame" sandbox="allow-scripts"></iframe>
+    </div>
+
+    <script>
+        const chatForm = document.getElementById('chatForm');
+        const userInput = document.getElementById('userInput');
+        const chatContainer = document.getElementById('chatContainer');
+        const sendBtn = document.getElementById('sendBtn');
+        const canvasPanel = document.getElementById('canvasPanel');
+        const canvasFrame = document.getElementById('canvasFrame');
+
+        // Indexed by a plain integer, never by embedding raw HTML into an
+        // attribute string — render_tool content can contain quotes and
+        // backticks, and the SYSTEM_PROMPT backtick-in-template-literal bug
+        // from earlier is exactly the failure mode that causes.
+        let renderCache = [];
+        let currentAbortController = null;
+        let lastUserMessageIndex = null;
+        let lastUserMessageText = "";
+
+        // One id per chat, sent with every /chat call — the server maps it
+        // to a persistent workspace directory so write_file/python_tool
+        // share real files across the whole conversation. Regenerated on
+        // Reset/New Chat: a new chat means a fresh, empty project, not the
+        // previous one's leftover files.
+        let sessionId = crypto.randomUUID();
+
+        // Runs entirely on local hardware the user owns, so unlike a hosted
+        // API there's no one "right" generation length / context size — a
+        // quick question doesn't need the same budget as a multi-fetch
+        // research report. Persisted so a reload doesn't silently reset it.
+        const powerSegments = document.querySelectorAll('.power-segment');
+        let currentPower = localStorage.getItem('vasudha_power') || '{{ default_power }}';
+
+        function setPower(level) {
+            currentPower = level;
+            localStorage.setItem('vasudha_power', level);
+            powerSegments.forEach(btn => btn.classList.toggle('active', btn.dataset.power === level));
+        }
+
+        powerSegments.forEach(btn => {
+            btn.addEventListener('click', () => setPower(btn.dataset.power));
+        });
+
+        setPower(currentPower);
+
+        function openCanvas(html) {
+            canvasFrame.srcdoc = html;
+            canvasPanel.classList.add('open');
+        }
+
+        function closeCanvas() {
+            canvasPanel.classList.remove('open');
+        }
+
+        function reopenCanvas(idx) {
+            const html = renderCache[idx];
+            if (html !== undefined) openCanvas(html);
+        }
+
+        // Initial system prompt will be injected cleanly on the server side
+        let messages = [
+            {"role": "system", "content": {{ system_prompt | tojson }}}
+        ];
+
+        function resetChatMemory() {
+            messages = [{"role": "system", "content": {{ system_prompt | tojson }}}];
+            renderCache = [];
+            lastUserMessageIndex = null;
+            lastUserMessageText = "";
+            sessionId = crypto.randomUUID();
+            closeCanvas();
+            chatContainer.innerHTML = `
+                <div class="message bot">
+                    <div class="msg-label">Vasudha</div>
+                    <div class="bubble">
+                        <div class="final-content" style="color: var(--success);">Chat memory reset. Ready for an entirely new, unpolluted topic.</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function toggleThinking(headerElement) {
+            const content = headerElement.nextElementSibling;
+            const isCollapsed = content.classList.contains('collapsed');
+            if (isCollapsed) {
+                content.classList.remove('collapsed');
+                headerElement.innerHTML = `▼ Thinking Process`;
+            } else {
+                content.classList.add('collapsed');
+                headerElement.innerHTML = `▶ Thinking Process`;
+            }
+        }
+
+        // Truncates messages/DOM back to before the given index and drops
+        // the edited message's text into the input, ready to resend —
+        // rather than appending a correction, this actually rewinds
+        // history so the model never sees the original wrong turn.
+        function startEditingMessage(index, text) {
+            if (index === undefined || index === null) return;
+            messages = messages.slice(0, index);
+            [...chatContainer.querySelectorAll('.message')].forEach(el => {
+                if (Number(el.dataset.msgIndex) >= index) el.remove();
+            });
+            userInput.value = text;
+            autoGrow();
+            userInput.focus();
+        }
+
+        function createMessageElement(role, text = "", index = null) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+            if (index !== null) msgDiv.dataset.msgIndex = index;
+
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'msg-label';
+            const labelText = document.createElement('span');
+            labelText.textContent = role === 'user' ? 'You' : 'Vasudha';
+            labelDiv.appendChild(labelText);
+            if (role === 'user' && index !== null) {
+                const editBtn = document.createElement('button');
+                editBtn.className = 'edit-btn';
+                editBtn.textContent = 'edit';
+                editBtn.onclick = () => startEditingMessage(index, text);
+                labelDiv.appendChild(editBtn);
+            }
+            msgDiv.appendChild(labelDiv);
+
+            const bubbleDiv = document.createElement('div');
+            bubbleDiv.className = 'bubble';
+            if (role === 'user') {
+                bubbleDiv.textContent = text;
+            } else {
+                bubbleDiv.innerHTML = `<div class="status-line"><span class="status-cursor"></span>thinking</div>`;
+            }
+
+            msgDiv.appendChild(bubbleDiv);
+            chatContainer.appendChild(msgDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return bubbleDiv;
+        }
+
+        // Reflects which stage of the pipeline is actually in flight right
+        // now (plan / search / execute / build), read directly off which
+        // tag is currently open in the stream — not a fake fixed-duration
+        // timer, so it stays honest if a step runs long.
+        function detectStage(text) {
+            const hasOpenTag = (tag) => text.includes(`<${tag}>`) && !text.includes(`</${tag}>`);
+            if (hasOpenTag('python_tool')) return 'executing python';
+            if (hasOpenTag('search_tool')) return 'searching the web';
+            if (hasOpenTag('fetch_tool')) return 'reading page';
+            if (hasOpenTag('render_tool')) return 'building the page';
+            if (hasOpenTag('write_file')) return 'writing file';
+            if (hasOpenTag('read_file')) return 'reading file';
+            if (hasOpenTag('list_directory')) return 'listing project files';
+            return 'thinking';
+        }
+
+        function parseAndRenderBotMessage(rawText, bubbleElement, isFinished = false) {
+            let processedText = rawText;
+            let html = "";
+
+            // 0. Extract render_tool FIRST, on the untouched raw text, before
+            // anything else runs. A multi-step turn can contain an earlier
+            // tool's already-styled <tool_output> HTML (from a prior
+            // search_tool/python_tool round-trip in this same stream)
+            // sitting right before the render_tool tag — extracting render
+            // content later, from text those other .replace() calls already
+            // mutated, risks the render_tool capture swallowing that
+            // unrelated styled markup. A placeholder token survives the rest
+            // of the pipeline untouched and gets swapped for the real card
+            // at the very end.
+            const RENDER_PLACEHOLDER = " RENDER_CARD ";
+            let renderCardHTML = "";
+            const closedRender = processedText.match(/<render_tool>([\s\S]*?)<\/render_tool>/);
+            if (closedRender) {
+                const htmlContent = stripCodeFences(closedRender[1]);
+                const idx = renderCache.push(htmlContent) - 1;
+                openCanvas(htmlContent);
+                renderCardHTML = `<div class="render-card" onclick="reopenCanvas(${idx})">Rendered in live preview — click to reopen</div>`;
+                processedText = processedText.slice(0, closedRender.index) + RENDER_PLACEHOLDER
+                    + processedText.slice(closedRender.index + closedRender[0].length);
+            } else {
+                const openRender = processedText.match(/<render_tool>([\s\S]*)$/);
+                if (openRender) {
+                    openCanvas(stripCodeFences(openRender[1]));
+                    renderCardHTML = `<div class="render-card">Rendering live preview...</div>`;
+                    processedText = processedText.slice(0, openRender.index) + RENDER_PLACEHOLDER;
+                }
+            }
+
+            // 1. Parse out Thinking Blocks
+            let thinkMatch = processedText.match(/<think>([\s\S]*?)<\/think>|<\|thought_start\|>([\s\S]*?)<\|thought_end\|>/);
+            let missingOpenMatch = !thinkMatch && processedText.match(/^([\s\S]*?)<\/think>/);
+            let unclosedThinkMatch = !thinkMatch && !missingOpenMatch && processedText.match(/<think>([\s\S]*)$|<\|thought_start\|>([\s\S]*)$/);
+
+            let thinkingText = "";
+            let isThinking = false;
+
+            if (thinkMatch) {
+                thinkingText = thinkMatch[1] || thinkMatch[2];
+                processedText = processedText.replace(thinkMatch[0], "").trim();
+            } else if (missingOpenMatch) {
+                thinkingText = missingOpenMatch[1];
+                processedText = processedText.replace(missingOpenMatch[0], "").trim();
+            } else if (unclosedThinkMatch) {
+                isThinking = true;
+                thinkingText = unclosedThinkMatch[1] || unclosedThinkMatch[2];
+                processedText = processedText.substring(0, unclosedThinkMatch.index).trim();
+            }
+
+            if (thinkingText.length > 0) {
+                const collapseClass = (!isThinking && isFinished) ? "collapsed" : "";
+                const arrow = (!isThinking && isFinished) ? "▶" : "▼";
+                html += `
+                    <div class="thinking-block">
+                        <div class="thinking-header" onclick="toggleThinking(this)">
+                            ${arrow} Thinking Process
+                        </div>
+                        <div class="thinking-content ${collapseClass}">${escapeHTML(thinkingText)}</div>
+                    </div>
+                `;
+            }
+
+            // 2. Parse tool calls (python_tool, search_tool) and outputs.
+            // render_tool was already extracted in step 0 above and replaced
+            // with RENDER_PLACEHOLDER, so it can't be touched by any of this.
+            let formattedContent = escapeHTML(processedText)
+                .replace(/&lt;python_tool&gt;([\s\S]*?)&lt;\/python_tool&gt;/g, (match, code) => {
+                    return `
+                        <div class="tool-call-block">
+                            <div class="tool-header">Executing Python Sandbox</div>
+                            <div class="tool-content">${code.trim()}</div>
+                        </div>
+                    `;
+                })
+                .replace(/&lt;search_tool&gt;([\s\S]*?)&lt;\/search_tool&gt;/g, (match, query) => {
+                    return `
+                        <div class="tool-call-block">
+                            <div class="tool-header">Searching the Web</div>
+                            <div class="tool-content">${query.trim()}</div>
+                        </div>
+                    `;
+                })
+                .replace(/&lt;fetch_tool&gt;([\s\S]*?)&lt;\/fetch_tool&gt;/g, (match, url) => {
+                    return `
+                        <div class="tool-call-block">
+                            <div class="tool-header">Reading Page</div>
+                            <div class="tool-content">${url.trim()}</div>
+                        </div>
+                    `;
+                })
+                .replace(/&lt;write_file&gt;\s*([^\n]+)\n([\s\S]*?)&lt;\/write_file&gt;/g, (match, path, content) => {
+                    return `
+                        <div class="tool-call-block">
+                            <div class="tool-header">Writing File — ${path.trim()}</div>
+                            <div class="tool-content">${content.trim()}</div>
+                        </div>
+                    `;
+                })
+                .replace(/&lt;read_file&gt;([\s\S]*?)&lt;\/read_file&gt;/g, (match, path) => {
+                    return `
+                        <div class="tool-call-block">
+                            <div class="tool-header">Reading File</div>
+                            <div class="tool-content">${path.trim()}</div>
+                        </div>
+                    `;
+                })
+                .replace(/&lt;list_directory&gt;([\s\S]*?)&lt;\/list_directory&gt;/g, (match, path) => {
+                    return `
+                        <div class="tool-call-block">
+                            <div class="tool-header">Listing Project Files</div>
+                            <div class="tool-content">${(path.trim() || '.')}</div>
+                        </div>
+                    `;
+                })
+                .replace(/&lt;tool_output&gt;([\s\S]*?)&lt;\/tool_output&gt;/g, (match, output) => {
+                    return `
+                        <div class="tool-output-block">
+                            <div class="tool-header">Real Output</div>
+                            <div class="tool-output-content">${output.trim()}</div>
+                        </div>
+                    `;
+                });
+
+            // Handle streaming (still-unclosed) tool tags so raw markup
+            // never leaks into view mid-generation.
+            formattedContent = formattedContent
+                .replace(/&lt;python_tool&gt;([\s\S]*?)$/, (match, code) => `
+                    <div class="tool-call-block">
+                        <div class="tool-header">Executing Python Sandbox (writing...)</div>
+                        <div class="tool-content">${code.trim()}</div>
+                    </div>
+                `)
+                .replace(/&lt;search_tool&gt;([\s\S]*?)$/, (match, query) => `
+                    <div class="tool-call-block">
+                        <div class="tool-header">Searching the Web (writing...)</div>
+                        <div class="tool-content">${query.trim()}</div>
+                    </div>
+                `)
+                .replace(/&lt;fetch_tool&gt;([\s\S]*?)$/, (match, url) => `
+                    <div class="tool-call-block">
+                        <div class="tool-header">Reading Page (writing...)</div>
+                        <div class="tool-content">${url.trim()}</div>
+                    </div>
+                `)
+                .replace(/&lt;write_file&gt;([\s\S]*?)$/, (match, partial) => `
+                    <div class="tool-call-block">
+                        <div class="tool-header">Writing File (writing...)</div>
+                        <div class="tool-content">${partial.trim()}</div>
+                    </div>
+                `)
+                .replace(/&lt;read_file&gt;([\s\S]*?)$/, (match, path) => `
+                    <div class="tool-call-block">
+                        <div class="tool-header">Reading File (writing...)</div>
+                        <div class="tool-content">${path.trim()}</div>
+                    </div>
+                `)
+                .replace(/&lt;list_directory&gt;([\s\S]*?)$/, (match, path) => `
+                    <div class="tool-call-block">
+                        <div class="tool-header">Listing Project Files (writing...)</div>
+                        <div class="tool-content">${path.trim()}</div>
+                    </div>
+                `);
+
+            // Swap the render_tool placeholder (if any) back in now that the
+            // rest of the pipeline has run without it in the way.
+            if (renderCardHTML) {
+                formattedContent = formattedContent.replace(RENDER_PLACEHOLDER, renderCardHTML);
+            }
+
+            if (formattedContent.trim().length > 0 || isFinished) {
+                html += `<div class="final-content">${formattedContent}</div>`;
+            } else if (!isThinking && formattedContent.length === 0) {
+                const stage = detectStage(rawText);
+                html += `<div class="status-line"><span class="status-cursor"></span>${stage}</div>`;
+            }
+
+            bubbleElement.innerHTML = html;
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function escapeHTML(str) {
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function stripCodeFences(str) {
+            return str.trim().replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
+        }
+
+        function autoGrow() {
+            userInput.style.height = 'auto';
+            userInput.style.height = Math.min(userInput.scrollHeight, 200) + 'px';
+        }
+        userInput.addEventListener('input', autoGrow);
+
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                chatForm.requestSubmit();
+            } else if (e.key === 'ArrowUp' && userInput.value === '' && lastUserMessageIndex !== null) {
+                e.preventDefault();
+                startEditingMessage(lastUserMessageIndex, lastUserMessageText);
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === '/' && document.activeElement !== userInput) {
+                e.preventDefault();
+                userInput.focus();
+            } else if (e.key === 'Escape' && currentAbortController) {
+                currentAbortController.abort();
+            }
+        });
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            const userMsgIndex = messages.length;
+            createMessageElement('user', text, userMsgIndex);
+            userInput.value = '';
+            autoGrow();
+            sendBtn.disabled = true;
+
+            messages.push({"role": "user", "content": text});
+            lastUserMessageIndex = userMsgIndex;
+            lastUserMessageText = text;
+            const botBubble = createMessageElement('bot');
+
+            currentAbortController = new AbortController();
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messages, power: currentPower, session_id: sessionId }),
+                    signal: currentAbortController.signal
+                });
+
+                if (!response.ok) throw new Error('Network response was not ok');
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let fullBotResponse = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, {stream: true});
+                    fullBotResponse += chunk;
+                    parseAndRenderBotMessage(fullBotResponse, botBubble, false);
+                }
+
+                parseAndRenderBotMessage(fullBotResponse, botBubble, true);
+
+                // Keep history clean of thinking tags, but retain tool calls/outputs for context
+                let cleanResponse = fullBotResponse.replace(/<think>[\s\S]*?<\/think>|<\|thought_start\|>[\s\S]*?<\|thought_end\|>/g, "").trim();
+                messages.push({"role": "assistant", "content": cleanResponse});
+
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    botBubble.innerHTML = `<div class="final-content" style="color: var(--text-tertiary);">Stopped.</div>`;
+                    messages.push({"role": "assistant", "content": "[stopped by user]"});
+                } else {
+                    console.error('Error:', error);
+                    botBubble.innerHTML = `<div class="final-content" style="color: var(--error);">Sorry, an error occurred while processing your request.</div>`;
+                }
+            } finally {
+                sendBtn.disabled = false;
+                currentAbortController = null;
+                userInput.focus();
+            }
+        });
+    </script>
+</body>
+</html>

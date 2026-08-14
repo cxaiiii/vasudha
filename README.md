@@ -1,234 +1,162 @@
 <div align="center">
 
-# 🌐 Vasudha
+<img src="app/ui/assets/monogram.png" alt="Vasudha" width="180">
 
-### Research-Grade Efficient Reasoning Language Model Framework
+# Vasudha
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.x](https://img.shields.io/badge/pytorch-2.x-ee4c2c.svg)](https://pytorch.org/)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Colab Compatible](https://img.shields.io/badge/Colab-T4%20Compatible-F9AB00.svg)](https://colab.research.google.com/)
+### An offline engineering assistant that computes its answers instead of guessing them
 
-*Maximize reasoning per FLOP — not model size.*
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-2C7430.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-F93E00.svg)](#install)
+[![Model on HuggingFace](https://img.shields.io/badge/weights-HuggingFace-EFB68B.svg)](https://huggingface.co/cxaiiii/vasudha-4b-v3-gguf)
+
+*A 4-billion-parameter model that runs entirely on your own machine — no API key,
+no subscription, nothing leaving your computer — paired with a real Python sandbox
+so every number in an answer is executed, not recalled.*
+
+Built by **Chaitanya**, an independent developer.
 
 </div>
 
 ---
 
-## Vision
+## The idea
 
-Vasudha is a research-first language model framework designed to push the frontier of **compute-efficient reasoning**. The goal is not to build the largest model, but to achieve maximum:
+Small local models are confidently wrong about arithmetic. Ask a 4B model for a
+beam deflection and it will write the right equation, substitute the right
+numbers, and then state a result that is wrong by a factor of ten — because it
+is predicting text, not calculating.
 
-- 🧠 Reasoning quality per FLOP
-- ⚡ Throughput and memory efficiency  
-- 🔬 Research velocity (rapid experimentation)
-- 💻 Accessibility (runs on Google Colab Free Tier)
+Vasudha treats that as an engineering problem rather than a limitation to
+apologise for. The model picks the governing equation and sets the problem up.
+**A real Python interpreter does the arithmetic.** You can open the working and
+see the exact code that ran and the exact output it produced.
 
-## Architecture Highlights
+The difference is not subtle:
 
-| Component | Design Choice | Rationale |
-|-----------|--------------|-----------|
-| **Attention** | Hybrid GLA + Full GQA (3:1) | O(n) linear attention 75% of layers, precise full attention every 4th layer |
-| **FFN** | Sparse MoE (every other layer) | DeepSeek-V3 style; fine-grained experts with Top-k routing |
-| **Linear Attention** | Gated Linear Attention (GLA) | Data-dependent 2D gates; chunkwise parallel training; O(1) inference |
-| **Normalization** | RMSNorm + QK-Norm | Qwen3-style training stability |
-| **Position** | RoPE with configurable theta | Long context ready |
-| **Routing** | Adaptive difficulty-aware Top-k | Easy→k=1, Medium→k=2, Hard→k=4 |
+| Setup | Correct | Tool actually fired |
+|---|---|---|
+| Model asked politely to use a calculator | **0 / 6** | 1 / 6 |
+| Model given a real tool interface | **4 / 6** | **6 / 6** |
 
-## Features
+Six numeric engineering problems, ground truth computed in Python, greedy
+decoding. Reproduce it yourself with `python scripts/bench_numeric.py`.
 
-### Core
-- 🔀 **Hybrid Attention** — Interleaved GLA + Full GQA with configurable ratio
-- 🎯 **Sparse MoE** — Top-1/2/4 routing, load balancing, Z-loss, capacity factors
-- 🧮 **Adaptive Routing** — Difficulty-based compute allocation (differentiable)
-- 🤔 **Reasoning Controller** — Lightweight difficulty predictor
-- 🗄️ **Paged KV Cache** — vLLM-style memory management
+## What it does
 
-### Training (Colab-First Design)
-- ✅ QLoRA (4-bit) — Finetune 8B models on T4
-- ✅ Gradient Checkpointing — Reduced activation memory
-- ✅ Sequence Packing — No wasted padding tokens
-- ✅ Streaming Datasets — Never run out of memory loading data
-- ✅ Checkpoint Resume — Survives Colab disconnects
-- ✅ SFT / DPO / ORPO / GRPO
+**Calculates, and shows the working.** Cantilever deflection, Reynolds numbers,
+RC cutoff frequencies, heat transfer. Every result comes with the code that
+produced it, expanded by default — the computation *is* the justification.
 
-### Backends
-- ⚡ **Triton Kernels** — RMSNorm, SwiGLU, Cross-Entropy, GLA, MoE Dispatch/Gather
-- 🔥 **FlashAttention-2** — Graceful fallback to SDPA if not available
-- 🤗 **HuggingFace Compatible** — `from_pretrained`, tokenizers, datasets
+**Searches the web, and tells you what it actually read.** Search queries are the
+only thing that ever leaves your machine, and the interface says so at the moment
+it happens.
 
-### Evaluation
-- 📊 GSM8K, MATH500, AIME, HumanEval, MBPP
-- 📏 LongBench, Needle-in-Haystack
-- 🔬 Throughput, VRAM, Latency benchmarks
+**Builds documents.** Reports, comparisons and spreadsheets render in a preview
+canvas beside the chat, with export. Markdown, CSV and HTML.
 
-## Quick Start
+**Tracks its own sources — honestly.** The application records which pages were
+genuinely fetched. If a document was written without opening a single source, it
+is labelled *unverified*, and a citation the model wrote without reading anything
+is removed. That is enforced by the app, not requested of the model, because the
+model will otherwise sign fabricated tables with authoritative-looking sources.
 
-### Install
+**Four personalities**, chosen on first run: Engineer, Teacher, Analyst,
+Companion. They are plain JSON files you can edit or extend without rebuilding.
+
+## Install
+
+**Download** the release, unzip it, run `Vasudha.exe`.
+
+On first launch it fetches the model once (2.11 GB) with a resumable, checksum-
+verified download. After that it works with no internet at all.
+
+Windows 10 or 11. No Python, no Ollama, no setup. If you already have Ollama
+running, Vasudha finds it and uses your GPU automatically — noticeably faster.
+
+<details>
+<summary><b>Run from source</b></summary>
 
 ```bash
-git clone https://github.com/vasudha-ai/vasudha
+git clone <this-repo>
 cd vasudha
-pip install -e .
+pip install -r requirements.txt
+python app/main.py
 ```
 
-For GPU kernels (CUDA machine):
+</details>
+
+<details>
+<summary><b>Just the weights</b></summary>
+
+[huggingface.co/cxaiiii/vasudha-4b-v3-gguf](https://huggingface.co/cxaiiii/vasudha-4b-v3-gguf)
+
+```
+sha256  0a31e817bf8e7a3f9d1214ac1445648e734b3acd10ce019f02fa12b691a791c9
+```
+
+Works with Ollama (`ollama create vasudha -f ollama/Modelfile-v3`) or llama.cpp
+(`llama-server -m <file> --jinja`). The GGUF carries its own chat template
+including tool-call support.
+
+</details>
+
+## What it is bad at
+
+Documented deliberately, because you will hit these.
+
+- **It can recall a standard formula with the wrong boundary condition.** For a
+  cantilever it has produced `PL³/(48EI)` — the simply-supported case — instead
+  of `PL³/(3EI)`. It gets the simply-supported version right, so the coefficient
+  is memorised without the support condition attached.
+- **Magnitude errors of exactly 10× or 1000×** in both arithmetic and recalled
+  facts. Asked for planetary masses it returned Neptune ten times too heavy while
+  ordering all eight planets correctly.
+- **Research is weaker than calculation.** Given thin search results it will fill
+  the gaps from memory. The unverified labelling makes this visible; it does not
+  make it accurate. Treat research output as a draft.
+
+The calculation path is the trustworthy one. The research and document features
+are genuinely useful and genuinely experimental, in that order.
+
+## Architecture
+
+Qwen3-4B converted to a hybrid — most layers Gated Linear Attention (O(1) memory
+in context length), a minority kept as full attention, with MoE upcycling. See
+[docs/architecture.md](docs/architecture.md).
+
+The desktop app is a pywebview shell over a WebView2 window: no bundled browser,
+no HTTP server, no open port. The UI talks to Python over an in-process bridge,
+so "nothing leaves your machine" is structural rather than a promise.
+
+```
+app/
+├── main.py         window, splash, JS bridge
+├── backends.py     Ollama or in-process llama.cpp, chosen at runtime
+├── session.py      the agent loop, tools, provenance
+├── personas.py     personality presets, loaded from editable JSON
+├── bootstrap.py    first-run model download, resumable + verified
+└── ui/             the interface
+scripts/
+├── bench_numeric.py      the accuracy gate
+├── publish_model.py      upload weights, wire the download link
+└── simulate_first_run.py wipe local state, see what a new user sees
+```
+
+## Verifying it yourself
+
 ```bash
-pip install -e ".[triton,flash]"
+python scripts/bench_numeric.py
 ```
 
-### Google Colab (T4 Free Tier)
+Six problems, verified answers, about two minutes. There is also a 28-prompt
+manual sheet at [docs/EVALUATION.md](docs/EVALUATION.md) covering mechanics,
+fluids, thermal, electronics, chemistry and behaviour — including cases that
+*should not* trigger a tool call.
 
-```python
-# One-click setup
-!pip install -q git+https://github.com/vasudha-ai/vasudha.git
-```
-
-Open: `notebooks/00_quickstart.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/)
-
-### Load a Model
-
-```python
-from vasudha import VasudhaForCausalLM, VasudhaConfig
-from transformers import AutoTokenizer
-
-# Load Qwen3-4B weights into Vasudha
-model = VasudhaForCausalLM.from_qwen3_pretrained(
-    "Qwen/Qwen3-4B",
-    attention_type="hybrid",   # GLA + GQA hybrid
-    use_moe=True,              # Enable sparse MoE
-    load_in_4bit=True,         # QLoRA-ready
-)
-
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
-
-# Generate with streaming
-from vasudha.inference import StreamingGenerator
-
-gen = StreamingGenerator(model, tokenizer)
-for token in gen.stream("Solve step by step: What is 15% of 240?"):
-    print(token, end="", flush=True)
-```
-
-### Fine-tune on Colab (QLoRA)
-
-Training is a **two-step** process. Vasudha's architecture differs from Qwen3
-(hybrid GLA attention, sparse MoE), so the pretrained weights must first be
-converted into a Vasudha checkpoint on disk. Conversion runs on CPU with a
-bounded memory footprint; quantization then happens at load time, so the fp32
-model is never materialized.
-
-```bash
-# Step 1 — convert once (~10 min, CPU only, writes a 7.4GB fp16 checkpoint)
-python scripts/convert_qwen3_to_vasudha.py \
-    --model Qwen/Qwen3-4B --out ./vasudha-4b-init \
-    --num-experts 8
-
-# Step 2 — train (loads in 4-bit NF4, ~2GB VRAM for the base weights)
-python scripts/train_sft.py model.vasudha_path=./vasudha-4b-init
-```
-
-Conversion is loss-preserving: attention and norm weights are copied directly,
-each dense FFN is upcycled into `num_experts` contiguous slices (the expert
-width is derived from the source model, so it always partitions evenly), and routers are
-zero-initialized so every MoE layer initially reproduces the dense layer it
-replaced. Only the GLA gate projections start random.
-
-```python
-from vasudha.training import VasudhaTrainer, QLoRAConfig, SFTConfig
-from vasudha.datasets import build_mixture
-
-# Build a streaming dataset mixture
-dataset = build_mixture(
-    sources={"open-thoughts/OpenThoughts3": 0.5, "AI-MO/NuminaMath-TIR": 0.5},
-    streaming=True,
-)
-
-# Configure QLoRA
-qlora_config = QLoRAConfig(
-    r=16,
-    lora_alpha=32,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    load_in_4bit=True,
-)
-
-# Train
-trainer = VasudhaTrainer(
-    model=model,
-    train_dataset=dataset,
-    qlora_config=qlora_config,
-    sft_config=SFTConfig(
-        max_seq_length=2048,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=8,
-        gradient_checkpointing=True,
-        num_train_epochs=1,
-        output_dir="./checkpoints",
-    ),
-)
-trainer.train()
-```
-
-## Project Structure
-
-```
-vasudha/
-├── vasudha/
-│   ├── models/          # Model backbone (VasudhaForCausalLM)
-│   ├── attention/       # GLA, GQA, Hybrid, Sliding Window
-│   ├── moe/             # Router, Experts, MoE layer, Adaptive routing
-│   ├── kernels/         # Triton: RMSNorm, SwiGLU, CrossEntropy, GLA, MoE
-│   ├── reasoning/       # Difficulty controller, Thinking mode
-│   ├── memory/          # Paged KV, Compressed KV, Latent compression
-│   ├── training/        # SFT, DPO, ORPO, GRPO, QLoRA, Packing
-│   ├── datasets/        # Streaming loaders, Mixtures, Chat formats
-│   ├── inference/       # Streaming gen, Dynamic batching, Speculative
-│   └── utils/           # Logging, VRAM monitor, dtype utils
-├── evaluation/          # GSM8K, MATH500, HumanEval, LongBench...
-├── configs/             # Hydra YAML configs
-├── scripts/             # Training & eval launch scripts
-├── notebooks/           # Colab-ready notebooks
-├── tests/               # Unit tests
-└── docs/                # Architecture docs, research notes
-```
-
-## Supported Backbones
-
-| Model | Parameters | Colab T4 | Quantization |
-|-------|-----------|----------|-------------|
-| Qwen3-4B | 4B | ✅ Full FP16 | ✅ 4-bit / 8-bit |
-| Qwen3-8B | 8B | ✅ QLoRA 4-bit | ✅ 4-bit |
-| Llama *(future)* | - | ✅ | ✅ |
-| Gemma *(future)* | - | ✅ | ✅ |
-
-## Design Philosophy
-
-1. **Correctness first** — Every module has a PyTorch reference implementation before Triton optimization
-2. **Colab-first** — Every design decision considers 15GB VRAM ceiling
-3. **No placeholders** — Every file is functional before the next is written
-4. **Research friendly** — Configuration-driven everything; swap attention/routing/FFN from YAML
-5. **HF compatible** — Works with `transformers` ecosystem out of the box
-
-## Benchmarks
-
-*(Coming soon — will be populated after training runs)*
-
-| Task | Score | Tokens/s | VRAM |
-|------|-------|---------|------|
-| GSM8K | - | - | - |
-| MATH500 | - | - | - |
-| HumanEval | - | - | - |
+Don't take the numbers in this README on faith. That would be an odd way to use
+a project about not taking numbers on faith.
 
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
-
-## Citation
-
-```bibtex
-@software{vasudha2025,
-  title  = {Vasudha: Research-Grade Efficient Reasoning Language Model Framework},
-  year   = {2025},
-  url    = {https://github.com/vasudha-ai/vasudha},
-}
-```

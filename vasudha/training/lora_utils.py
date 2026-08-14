@@ -35,6 +35,12 @@ class QLoRAConfig:
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj"
     ])
+    # Modules trained in full rather than LoRA-adapted. A low-rank delta only
+    # makes sense as a correction on top of meaningful pretrained weights —
+    # GLA's g_proj has no analog in standard attention and starts randomly
+    # initialized, so a LoRA delta on top of noise is still noise. Needs full
+    # training, same as a newly added classifier head would.
+    modules_to_save: list[str] | None = None
     load_in_4bit: bool = True
     load_in_8bit: bool = False
     bnb_4bit_quant_type: str = "nf4"
@@ -70,6 +76,7 @@ def get_lora_config(qlora_config: QLoRAConfig) -> "LoraConfig":
         bias=qlora_config.bias,
         task_type=qlora_config.task_type,
         target_modules=qlora_config.target_modules,
+        modules_to_save=qlora_config.modules_to_save,
     )
 
 def prepare_model_for_qlora(model: Any, qlora_config: QLoRAConfig) -> Any:

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vasudha Engineering</title>
+<style>
+body{margin:0;background:#101318;color:#e8edf2;font:16px system-ui;display:flex;justify-content:center}
+main{width:min(900px,94vw);padding:28px 0}.sub{color:#91a0ad;margin-top:-12px}
+#chat{min-height:60vh;padding:16px 0}.msg{padding:14px 16px;margin:12px 0;border-radius:12px;white-space:pre-wrap;line-height:1.5}.user{background:#24384a}.bot{background:#192329}.thinking{color:#9eabb5;border-left:3px solid #657784;padding-left:12px;font-size:.9em;margin-bottom:12px}
+form{display:flex;gap:8px;position:sticky;bottom:12px}textarea{flex:1;background:#1b2228;color:#fff;border:1px solid #40515d;border-radius:10px;padding:12px;font:inherit;resize:vertical}button{background:#54d39b;border:0;border-radius:10px;padding:0 20px;font-weight:700}input{width:100%;box-sizing:border-box;background:#151b20;color:#bac6ce;border:1px solid #33424c;padding:8px;border-radius:7px}
+</style>
+<main>
+<h1>Vasudha Engineering</h1><p class="sub">Qwen3-8B · safe engineering reasoning bench</p>
+<label>Modal endpoint URL <input id="url" placeholder="https://your-app--vasudha-chat.modal.run"></label>
+<label>Modal key ID <input id="key" placeholder="wk-…"></label>
+<label>Modal key secret <input id="secret" type="password" placeholder="ws-…"></label>
+<section id="chat"></section>
+<form><textarea id="prompt" rows="3" placeholder="Ask an engineering question…"></textarea><button>Send</button></form>
+<script>
+const box=document.querySelector('#chat'), form=document.querySelector('form'), prompt=document.querySelector('#prompt'), url=document.querySelector('#url'), key=document.querySelector('#key'), secret=document.querySelector('#secret');
+let messages=[];
+function add(cls,text,thinking=''){let d=document.createElement('div');d.className='msg '+cls;if(thinking){let t=document.createElement('details');t.className='thinking';t.innerHTML='<summary>Show thinking</summary>'+esc(thinking);d.append(t)}let p=document.createElement('div');p.innerHTML=esc(text);d.append(p);box.append(d);box.scrollTop=box.scrollHeight}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+form.onsubmit=async e=>{e.preventDefault();let q=prompt.value.trim();if(!q)return;if(!url.value) return alert('Paste the Modal endpoint URL first.');prompt.value='';add('user',q);messages.push({role:'user',content:q});let h={'Content-Type':'application/json'};if(key.value)h['Modal-Key']=key.value;if(secret.value)h['Modal-Secret']=secret.value;let r=await fetch(url.value,{method:'POST',headers:h,body:JSON.stringify({messages,max_new_tokens:768,temperature:.7})});if(!r.ok){add('bot','Request failed: '+r.status);return}let x=await r.json();add('bot',x.answer||x.raw||'',x.thinking);messages.push({role:'assistant',content:x.raw||x.answer||''})}
+</script>
+</main>
+</html>
