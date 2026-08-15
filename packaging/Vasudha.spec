@@ -106,7 +106,14 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-_icon = ROOT / "packaging" / "vasudha.ico"
+# Windows wants .ico, macOS wants .icns, and handing either the wrong format
+# is a hard error rather than a fallback.
+if sys.platform == "darwin":
+    _icon = ROOT / "packaging" / "vasudha.icns"
+elif sys.platform == "win32":
+    _icon = ROOT / "packaging" / "vasudha.ico"
+else:
+    _icon = ROOT / "packaging" / "nonexistent"
 
 exe = EXE(
     pyz,
@@ -146,7 +153,8 @@ coll = COLLECT(
 # runnable — it has no bundled runtime beside it — and double-clicking it fails
 # with "Failed to load Python DLL ... python314.dll". It looks exactly like the
 # real thing in Explorer, so remove it and leave only dist/Vasudha/Vasudha.exe.
-_stray = Path(DISTPATH).parent / "build" / "Vasudha" / "Vasudha.exe"
+_stray = (Path(DISTPATH).parent / "build" / "Vasudha" /
+          ("Vasudha.exe" if sys.platform == "win32" else "Vasudha"))
 try:
     if _stray.exists():
         _stray.unlink()

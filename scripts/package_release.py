@@ -18,6 +18,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+#: PyInstaller names the binary after the spec, with a .exe suffix on Windows
+#: only.
+EXE = "Vasudha.exe" if sys.platform == "win32" else "Vasudha"
+
 
 def default_dist() -> Path:
     """Prefer dist/, but fall back to dist_build/ — PyInstaller cannot clean
@@ -25,12 +29,12 @@ def default_dist() -> Path:
     redirected there and the release step must follow."""
     primary = ROOT / "dist" / "Vasudha"
     alternate = ROOT / "dist_build" / "Vasudha"
-    if (primary / "Vasudha.exe").is_file() and not (alternate / "Vasudha.exe").is_file():
+    if (primary / EXE).is_file() and not (alternate / EXE).is_file():
         return primary
-    if (alternate / "Vasudha.exe").is_file():
+    if (alternate / EXE).is_file():
         newer = max((primary, alternate),
-                    key=lambda p: (p / "Vasudha.exe").stat().st_mtime
-                    if (p / "Vasudha.exe").is_file() else 0)
+                    key=lambda p: (p / EXE).stat().st_mtime
+                    if (p / EXE).is_file() else 0)
         return newer
     return primary
 
@@ -60,7 +64,7 @@ def main() -> int:
 
     global DIST
     DIST = args.dist or default_dist()
-    exe = DIST / "Vasudha.exe"
+    exe = DIST / EXE
     if not exe.is_file():
         print(f"No build at {exe}\nRun PyInstaller first.", file=sys.stderr)
         return 1
@@ -95,7 +99,9 @@ def main() -> int:
     print(f"\n  {len(files)} files, {human(total)}")
 
     if args.zip:
-        archive = ROOT / "dist" / f"{args.name}.zip"
+        # Beside the staged folder, not a hardcoded dist/ — otherwise a build
+        # redirected to dist_build/ writes its archive somewhere else entirely.
+        archive = DIST.parent / f"{args.name}.zip"
         print(f"\ncompressing -> {archive.name}  (a few minutes)")
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for path in files:

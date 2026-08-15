@@ -292,10 +292,8 @@ class Api:
 
     @staticmethod
     def _open_folder(path: Path) -> None:
-        try:
-            os.startfile(str(path))  # noqa: S606 - the user's own folder
-        except OSError:
-            logger.exception("could not open %s", path)
+        from app.paths import open_folder
+        open_folder(path)
 
     def clear_history(self) -> None:
         for row in self._chats.list_summaries(limit=10_000):

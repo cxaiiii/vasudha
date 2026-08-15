@@ -19,10 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 def _settings_path() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share")
-    root = Path(base) / "Vasudha"
-    root.mkdir(parents=True, exist_ok=True)
-    return root / "settings.json"
+    from app.paths import app_data_dir
+    return app_data_dir() / "settings.json"
 
 
 @dataclass

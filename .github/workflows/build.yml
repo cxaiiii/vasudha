@@ -1,0 +1,102 @@
+# Build Vasudha for Windows and macOS.
+#
+# PyInstaller cannot cross-compile — a macOS bundle has to be produced on
+# macOS. This repo is public, so GitHub's macos runners are free, which makes
+# them the practical way to ship a Mac build without owning a Mac.
+#
+# Push a tag (v0.2.0) to attach both builds to a release, or run it by hand
+# from the Actions tab.
+
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:          # run manually from the Actions tab
+
+permissions:
+  contents: write             # needed to attach artefacts to a release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false        # a Windows failure should not cancel the Mac build
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            exe: dist/Vasudha/Vasudha.exe
+          - os: macos-14      # Apple Silicon
+            name: macos-arm64
+            exe: dist/Vasudha/Vasudha
+          - os: macos-13      # Intel
+            name: macos-x64
+            exe: dist/Vasudha/Vasudha
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          pip install pyinstaller pywebview requests beautifulsoup4 ddgs pillow
+          # llama-cpp-python builds from source on macOS and takes ~10 minutes.
+          # The app runs fine without it — that backend is optional, and Ollama
+          # covers the fast path — so a failure here must not fail the build.
+          pip install llama-cpp-python || echo "llama-cpp-python unavailable; built-in backend disabled"
+
+      - name: Sanity-check the app imports
+        shell: bash
+        run: |
+          python -c "
+          import app.paths, app.settings, app.personas, app.history, app.session
+          print('data dir:', app.paths.app_data_dir())
+          print('personas:', [p.key for p in app.personas.load_all()])
+          "
+
+      - name: Build
+        shell: bash
+        run: pyinstaller --noconfirm --clean packaging/Vasudha.spec
+
+      - name: Stage release files
+        shell: bash
+        run: python scripts/package_release.py
+
+      - name: Verify the binary exists
+        shell: bash
+        run: |
+          test -e "${{ matrix.exe }}" || { echo "missing ${{ matrix.exe }}"; exit 1; }
+          echo "built: $(du -sh dist/Vasudha | cut -f1)"
+
+      # Unsigned macOS apps are quarantined by Gatekeeper. Stripping the
+      # attribute inside the zip does not survive download, so the README
+      # explains the right-click-Open route instead of pretending otherwise.
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "Vasudha-${{ matrix.name }}.zip" Vasudha
+          else
+            zip -qry "Vasudha-${{ matrix.name }}.zip" Vasudha
+          fi
+          ls -lh Vasudha-${{ matrix.name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vasudha-${{ matrix.name }}
+          path: dist/Vasudha-${{ matrix.name }}.zip
+          retention-days: 14
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Vasudha-${{ matrix.name }}.zip

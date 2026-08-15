@@ -95,8 +95,8 @@ def bundled_dir() -> Path:
 
 
 def user_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share")
-    return Path(base) / "Vasudha" / "personas"
+    from app.paths import app_data_dir
+    return app_data_dir() / "personas"
 
 
 #: Written after the first seed. Without it, seeding runs on every load and a
