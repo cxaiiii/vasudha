@@ -1178,3 +1178,50 @@ body.resizing * { pointer-events: none; user-select: none !important; }
   border-radius: var(--radius-pill);
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(188, 146, 113, 0.62); }
+
+/* ── Attachments and generated images ───────────────────────────────────── */
+
+#attachments { display: none; gap: 8px; flex-wrap: wrap; padding: 0 4px 8px; }
+#attachments.show { display: flex; }
+.attach-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 11px;
+  background: var(--paper-deep);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pill);
+  font-size: 12.5px;
+  max-width: 260px;
+}
+.attach-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip small { color: var(--ink-soft); opacity: 0.7; font-size: 11px; }
+
+#attach {
+  flex: none;
+  align-self: flex-end;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 8px 4px 9px;
+  opacity: 0.55;
+  transition: opacity 130ms ease;
+}
+#attach:hover { opacity: 1; }
+
+/* A plot fills the canvas width and keeps its aspect. White plate because
+   matplotlib writes a transparent background by default, and transparent PNGs
+   on warm paper render as unreadable mud. */
+.canvas-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  border: 1px solid var(--stroke-soft);
+  border-radius: 10px;
+}

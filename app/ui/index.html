@@ -64,7 +64,11 @@
     </div>
 
     <div id="composer">
+      <!-- Attached files sit above the box, not inside the message: the model
+           is given a description of each, never its contents. -->
+      <div id="attachments"></div>
       <div id="composer-inner">
+        <button id="attach" title="Attach a file for the model to work on">&#128206;</button>
         <textarea id="input" rows="1" placeholder="Ask a question…"></textarea>
         <button id="send" title="Send (Enter)">&#8594;</button>
       </div>

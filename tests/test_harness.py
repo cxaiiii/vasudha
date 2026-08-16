@@ -346,6 +346,110 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── attachments ───────────────────────────────────────────────────────────────
+
+def _big_csv(tmp_path, rows=5000):
+    path = tmp_path / "data.csv"
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("id,rating,text\n")
+        for i in range(rows):
+            handle.write(f"{i},{i % 5 + 1},review number {i}\n")
+    return path
+
+
+def test_a_large_file_is_described_not_inlined(tmp_path):
+    """The whole design: a file the model must work on never enters the prompt.
+
+    A description costs a few hundred tokens and answers the same questions
+    inlining would — how big, what columns, what the rows look like — except it
+    also works when the file is a gigabyte.
+    """
+    from web.tools import describe_file
+    source = _big_csv(tmp_path, rows=5000)
+    described = describe_file(source)
+
+    assert len(described) < 1500
+    assert len(described) < source.stat().st_size / 50
+    assert "5,001 lines" in described
+    assert "3 columns" in described
+    assert "review number 0" in described      # a real sample
+    assert "review number 4999" not in described   # but not the whole file
+
+
+def test_read_file_refuses_a_large_file_instead_of_truncating(tmp_path):
+    """Truncation looks like success: the model reads the first slice, sees
+    plausible rows, and answers about a fraction of the data without saying so.
+    """
+    session = _session([], tmp_path)
+    big = _big_csv(tmp_path / "ws" if (tmp_path / "ws").exists() else tmp_path, rows=4000)
+    session._write_file("data.csv", big.read_text(encoding="utf-8"))
+
+    result = session._read_file("data.csv")
+    assert "too large to read into the conversation" in result
+    assert "python_tool" in result
+    # The description is offered in its place, so the turn is not wasted.
+    assert "lines" in result
+
+
+def test_a_small_file_is_still_read_normally(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("notes.txt", "a short note")
+    assert session._read_file("notes.txt") == "a short note"
+
+
+def test_attaching_puts_the_file_in_the_workspace(tmp_path):
+    source = tmp_path / "outside.csv"
+    source.write_text("a,b\n1,2\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    session = _session([], workspace)
+    record = session.attach(str(source))
+
+    assert record["ok"]
+    assert (workspace / "outside.csv").exists()   # copied, so the sandbox can open it
+    assert "outside.csv" in session._attachment_section()
+
+
+def test_attaching_the_same_name_twice_does_not_duplicate(tmp_path):
+    source = tmp_path / "x.csv"
+    source.write_text("a\n1\n", encoding="utf-8")
+    session = _session([], tmp_path / "ws2")
+    session.attach(str(source))
+    session.attach(str(source))
+    assert len(session.attachments) == 1
+
+
+def test_attaching_a_missing_file_reports_it(tmp_path):
+    session = _session([], tmp_path)
+    assert session.attach(str(tmp_path / "nope.csv"))["ok"] is False
+
+
+# ── generated images ──────────────────────────────────────────────────────────
+
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c6360000002000100ffff03000006000557bfabd400"
+    "00000049454e44ae426082")
+
+
+def test_a_new_image_is_surfaced_and_an_old_one_is_not(tmp_path):
+    """A chart is the answer, not a side effect: matplotlib writes a PNG and
+    prints nothing, so without this the model reports success and the user sees
+    no plot. Re-showing an unchanged image on every later call is the opposite
+    failure."""
+    session = _session([], tmp_path)
+    root = session._files().workspace
+
+    (root / "plot.png").write_bytes(_PNG)          # pre-existing
+    session._python_tool(code="print('hello')")
+    assert session.new_images == []                 # untouched, so not shown
+
+    session._python_tool(
+        code="open('new.png','wb').write(bytes.fromhex('%s'))" % _PNG.hex())
+    assert [p for p in session.new_images if p.endswith("new.png")]
+
+
 # ── memory book ───────────────────────────────────────────────────────────────
 
 def test_a_lesson_survives_a_restart(tmp_path):

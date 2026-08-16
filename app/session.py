@@ -418,6 +418,11 @@ class ChatSession:
         self._file_tools = None
         self._installer = None
         self._shell = None
+        #: Files the user attached this session, as {name, path, size,
+        #: description}. Only the description ever reaches the prompt.
+        self.attachments: list[dict] = []
+        #: Images written by the last python_tool call, drained by ask().
+        self.new_images: list[str] = []
         #: Lazily launched on the first browse_tool call, then kept for the rest
         #: of the chat — research is several steps and relaunching would drop
         #: the cookies that make a multi-page flow work.
@@ -467,8 +472,82 @@ class ChatSession:
 
     # -- tools -------------------------------------------------------------
 
+    # -- attachments -------------------------------------------------------
+
+    def attach(self, source: str) -> dict:
+        """Copy a file into the workspace and describe it to the model.
+
+        Copied rather than referenced so the sandbox — which has no access to
+        the rest of the disk by design — can actually open it, and so the file
+        is still there if the user moves the original.
+
+        The description, not the contents, is what enters the conversation.
+        See web.tools.describe_file: a 40 MB CSV becomes a row count, a column
+        list and twelve sample lines, which is everything the model needs in
+        order to write code that processes the whole thing.
+        """
+        import shutil
+        from web.tools import describe_file
+
+        origin = Path(source)
+        if not origin.is_file():
+            return {"ok": False, "error": f"not a file: {source}"}
+
+        root = self._files().workspace
+        target = root / re.sub(r"[^\w\-. ]+", "_", origin.name)
+        try:
+            if origin.resolve() != target.resolve():
+                shutil.copy2(origin, target)
+        except OSError as exc:
+            return {"ok": False, "error": f"could not copy: {exc}"}
+
+        record = {"name": target.name, "path": str(target),
+                  "size": target.stat().st_size,
+                  "description": describe_file(target)}
+        self.attachments = [a for a in self.attachments if a["name"] != record["name"]]
+        self.attachments.append(record)
+        return {"ok": True, **record}
+
+    def _attachment_section(self) -> str:
+        """The note appended to the system prompt while files are attached."""
+        if not self.attachments:
+            return ""
+        parts = ["\n\nFILES THE USER ATTACHED (already in your workspace — open "
+                 "them by name with python_tool; do NOT ask the user to paste "
+                 "their contents):"]
+        parts += [a["description"] for a in self.attachments]
+        parts.append(
+            "For anything larger than a few hundred lines, do not read the file "
+            "into the conversation. Write code that streams or aggregates it and "
+            "prints only the answer.")
+        return "\n\n".join(parts)
+
+    # -- tools -------------------------------------------------------------
+
     def _python_tool(self, code: str = "", **_: object) -> str:
-        return self._executor.execute_python(code, cwd=self._workspace)
+        """Run code, then surface any picture it drew.
+
+        Charts are the case where 'print the answer' is not enough: matplotlib
+        writes a PNG and says nothing, so without this the model reports success
+        and the user sees no plot. Files created during the call are compared
+        against a snapshot taken before it, so an image that was already in the
+        workspace is not re-shown on every later call.
+        """
+        from web.tools import IMAGE_SUFFIXES
+
+        root = self._files().workspace
+        before = {p: p.stat().st_mtime for p in root.rglob("*")
+                  if p.suffix.lower() in IMAGE_SUFFIXES and p.is_file()}
+
+        result = self._executor.execute_python(code, cwd=self._workspace)
+
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            if before.get(path) == path.stat().st_mtime:
+                continue
+            self.new_images.append(str(path))
+        return result
 
     def _remember_tool(self, topic: str = "", lesson: str = "",
                        source: str = "", **_: object) -> str:
@@ -904,6 +983,7 @@ class ChatSession:
         system = self.system_prompt
         if self.memory is not None:
             system += self.memory.as_prompt_section()
+        system += self._attachment_section()
         convo = [{"role": "system", "content": system}] + list(self.history)
 
         turn_started = time.time()
@@ -1005,6 +1085,11 @@ class ChatSession:
                 # back through the model's context to reach the screen.
                 if call.name == "document_tool" and self.last_document:
                     yield {"kind": "document", **self.last_document}
+
+                # A chart is a result, not a side effect: show it as soon as
+                # it exists rather than at the end of the turn.
+                while self.new_images:
+                    yield {"kind": "image", "path": self.new_images.pop(0)}
 
                 # tool_call_id, and recorded in history rather than only in the
                 # working transcript. Tool results used to be dropped at the end

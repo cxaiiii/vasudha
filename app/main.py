@@ -641,6 +641,51 @@ class Api:
         self._call_js("loadChat", {"events": chat.events})
         self._push_chat_list()
 
+    def attach_file(self) -> dict:
+        """Let the user pick a file for the model to work on.
+
+        The file is copied into the workspace and *described* to the model —
+        size, line count, columns, a dozen sample rows. Its contents never
+        enter the conversation, which is what makes attaching a 40 MB CSV a
+        sensible thing to do rather than an instant context overflow.
+        """
+        if not self._window or not self._session:
+            return {"ok": False, "error": "no chat is open yet"}
+        chosen = self._window.create_file_dialog(webview.OPEN_DIALOG,
+                                                 allow_multiple=True)
+        if not chosen:
+            return {"ok": False, "error": ""}
+        # Same string-or-tuple guard as locate_model: some pywebview backends
+        # return a bare string, and indexing it yields one character.
+        paths = [chosen] if isinstance(chosen, str) else list(chosen)
+
+        attached, failed = [], []
+        for path in paths:
+            result = self._session.attach(path)
+            (attached if result.get("ok") else failed).append(result)
+        return {"ok": bool(attached), "attached": attached,
+                "error": "; ".join(f.get("error", "") for f in failed)}
+
+    def image_data_url(self, path: str) -> str:
+        """A picture as a data: URI.
+
+        There is no HTTP server to serve files from — that is the whole point of
+        the js_api bridge — so an image reaches the canvas as bytes or not at
+        all. Bounded because a data URI is base64 and lands in the DOM.
+        """
+        import base64
+        import mimetypes
+        try:
+            target = Path(path)
+            if target.stat().st_size > 12_000_000:
+                return ""
+            mime = mimetypes.guess_type(target.name)[0] or "image/png"
+            return (f"data:{mime};base64,"
+                    + base64.b64encode(target.read_bytes()).decode("ascii"))
+        except (OSError, ValueError):
+            logger.warning("could not read image %s", path, exc_info=True)
+            return ""
+
     def open_workspace_folder(self) -> None:
         """Show the user where the model's files actually are."""
         self._open_folder(self._workspace_for(self._chat.id))

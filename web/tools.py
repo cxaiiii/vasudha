@@ -39,6 +39,73 @@ def _strip_code_fences(text: str) -> str:
     return "\n".join(lines)
 
 
+#: Above this, read_file refuses and says to process the file in code instead.
+#: 60 KB is roughly 15k tokens — already most of an 8k window, and a file that
+#: size is never something the model needs *verbatim*; it needs an answer about
+#: it. Refusing here is what turns "attach a 40 MB CSV" from a context overflow
+#: into a two-line pandas script.
+MAX_READ_BYTES = 60_000
+
+#: Extensions the canvas can display. Anything else is described, not shown.
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
+_TABULAR = {".csv", ".tsv", ".txt", ".log", ".md", ".json", ".jsonl", ".py",
+            ".yaml", ".yml", ".xml", ".html"}
+
+
+def describe_file(path: Path, preview_lines: int = 12) -> str:
+    """What the model is told about an attached file — never its contents.
+
+    The whole design rests on this. A 40 MB CSV cannot enter the context and
+    does not need to: what the model needs in order to write the right code is
+    the shape of the thing — how big, what columns, what the first few rows
+    look like. Handing it a sample and a row count costs a couple of hundred
+    tokens and answers the same questions that inlining the file would, except
+    it also works when the file is a gigabyte.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return f"{path.name} — could not be read ({exc})"
+
+    human = (f"{size/1e9:.2f} GB" if size >= 1e9 else
+             f"{size/1e6:.1f} MB" if size >= 1e6 else
+             f"{size/1e3:.1f} KB" if size >= 1e3 else f"{size} bytes")
+    suffix = path.suffix.lower()
+
+    if suffix in IMAGE_SUFFIXES:
+        return f"`{path.name}` — image, {human}"
+
+    if suffix not in _TABULAR:
+        return (f"`{path.name}` — {human}, binary or unrecognised type. "
+                "Open it in code to find out what it holds.")
+
+    # Counted by streaming rather than by reading the file in: the point of
+    # this function is that the file never has to fit in memory, and a
+    # read_text() here would defeat it on exactly the files that matter.
+    try:
+        lines = 0
+        sample: list[str] = []
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for i, line in enumerate(handle):
+                lines += 1
+                if i < preview_lines:
+                    sample.append(line.rstrip("\n")[:200])
+    except OSError as exc:
+        return f"`{path.name}` — {human}, unreadable ({exc})"
+
+    header = ""
+    if suffix in (".csv", ".tsv") and sample:
+        delimiter = "\t" if suffix == ".tsv" else ","
+        columns = sample[0].split(delimiter)
+        header = f", {len(columns)} columns"
+
+    body = "\n".join(sample)
+    more = f"\n… and {lines - preview_lines:,} more lines" if lines > preview_lines else ""
+    return (f"`{path.name}` — {human}, {lines:,} lines{header}\n"
+            f"First {min(lines, preview_lines)} lines:\n```\n{body}\n```{more}")
+
+
 def packages_dir() -> str:
     """Where pip_tool installs, and where the sandbox looks for imports.
 
@@ -444,10 +511,24 @@ class WorkspaceFileTools:
             return f"[Error: {rel_path} does not exist]"
         if not target.is_file():
             return f"[Error: {rel_path} is not a file]"
+
+        # A large file is refused rather than truncated. Truncation looks like
+        # success: the model reads the first 60 KB of a 40 MB CSV, sees plausible
+        # rows, and answers about 0.15% of the data without knowing it. Describing
+        # the file and pointing at code is the only honest response, and it is
+        # also the one that actually works.
+        size = target.stat().st_size
+        if size > MAX_READ_BYTES:
+            return (f"[{rel_path} is {size/1e6:.1f} MB — too large to read into the "
+                    f"conversation, and reading part of it would answer about a "
+                    f"fraction of the data without saying so.\n\n"
+                    f"{describe_file(target)}\n\n"
+                    "Process it with python_tool instead — open it, iterate, and "
+                    "print only the result you need.]")
         try:
             return target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return f"[Error: {rel_path} is not a readable text file]"
+            return (f"[Error: {rel_path} is not text. {describe_file(target)}]")
 
     def list_directory(self, rel_path: str = ".") -> str:
         if rel_path in ("", ".", "/", "\\", None):

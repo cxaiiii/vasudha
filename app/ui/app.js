@@ -198,6 +198,9 @@ const TOOL_LABELS = {
   search_tool: 'searched the web (query sent to DuckDuckGo)',
   fetch_tool: 'downloaded and read a page',
   browse_tool: 'opened a page in a browser',
+  pip_tool: 'installed a package',
+  shell_tool: 'ran a shell command',
+  remember_tool: 'wrote a note to its memory book',
   document_tool: 'built a document',
   render_tool: 'rendered a preview',
   write_file: 'wrote a file',
@@ -351,6 +354,13 @@ window.vasudha = {
       case 'document':
         recordArtifact(evt);
         showDocument(evt);
+        break;
+
+      /* A chart is the answer, not a side effect. matplotlib writes a PNG and
+         prints nothing, so without this the model reports success and the user
+         sees no plot at all. */
+      case 'image':
+        showImage(evt.path);
         break;
 
       case 'status':
@@ -786,6 +796,31 @@ function sanitizeHtml(html) {
   return doc.body.innerHTML;
 }
 
+/* Show a generated image in the canvas.
+
+   Fetched as a data: URI over the bridge rather than an <img src="file://">:
+   the page is served from pywebview's own root, so a file:// reference to the
+   workspace is cross-origin and silently renders nothing. */
+async function showImage(path) {
+  let dataUrl = '';
+  try {
+    dataUrl = await window.pywebview.api.image_data_url(path);
+  } catch (e) {
+    dataUrl = '';
+  }
+  if (!dataUrl) return;
+
+  const name = String(path).split(/[\\/]/).pop();
+  showDocument({
+    title: name,
+    format: 'image',
+    filename: name,
+    path: path,
+    content: dataUrl,
+    sourced: true,           // it was produced here, not recalled
+  });
+}
+
 function showDocument(doc) {
   currentDoc = doc;
   const shell = $('#shell');
@@ -800,13 +835,24 @@ function showDocument(doc) {
      model wrote that is the file it was saved to; a bare title would look like
      a URL slot with nothing in it. */
   const kindEl = $('#canvas-kind');
-  kindEl.textContent = { markdown: 'DOC', csv: 'SHEET', html: 'PAGE' }[doc.format] || 'DOC';
+  kindEl.textContent = { markdown: 'DOC', csv: 'SHEET', html: 'PAGE',
+                         image: 'PLOT' }[doc.format] || 'DOC';
   kindEl.classList.toggle('web', doc.format === 'web');
   $('#canvas-title').textContent = doc.path || doc.filename || doc.title || 'Document';
   $('#canvas-title').title = doc.path || doc.title || '';
-  $('#canvas-source').querySelector('code').textContent = doc.content || '';
+  // An image's "source" is a megabyte of base64, which helps nobody. Show the
+  // path it was written to instead.
+  $('#canvas-source').querySelector('code').textContent =
+    doc.format === 'image' ? (doc.path || doc.filename || '') : (doc.content || '');
 
-  if (doc.format === 'csv') {
+  if (doc.format === 'image') {
+    render.innerHTML = '';
+    const img = document.createElement('img');
+    img.className = 'canvas-image';
+    img.src = doc.content || '';
+    img.alt = doc.title || 'generated image';
+    render.appendChild(img);
+  } else if (doc.format === 'csv') {
     render.innerHTML = csvToTable(doc.content || '');
   } else if (doc.format === 'html') {
     render.innerHTML = sanitizeHtml(doc.content || '');
@@ -1098,4 +1144,44 @@ window.vasudha.onEvent = (evt) => {
 window.addEventListener('pywebviewready', () => {
   window.pywebview.api.ready();
   input.focus();
+});
+
+/* ── Attachments ──────────────────────────────────────────────────────
+
+   The file is copied into the workspace and *described* to the model —
+   size, line count, columns, a few sample rows. Its contents never enter
+   the conversation, which is what makes attaching a 40 MB CSV reasonable
+   rather than an instant context overflow. */
+
+let attached = [];
+
+function renderAttachments() {
+  const box = $('#attachments');
+  box.innerHTML = '';
+  box.classList.toggle('show', attached.length > 0);
+  attached.forEach((file) => {
+    const chip = document.createElement('span');
+    chip.className = 'attach-chip';
+    const kb = file.size >= 1e6 ? `${(file.size / 1e6).toFixed(1)} MB`
+                                : `${Math.max(1, Math.round(file.size / 1e3))} KB`;
+    chip.innerHTML = `<span>${escapeHtml(file.name)}</span><small>${kb}</small>`;
+    box.appendChild(chip);
+  });
+}
+
+$('#attach').addEventListener('click', async () => {
+  try {
+    const result = await window.pywebview.api.attach_file();
+    if (result && result.ok) {
+      result.attached.forEach((f) => {
+        attached = attached.filter((a) => a.name !== f.name);
+        attached.push(f);
+      });
+      renderAttachments();
+    } else if (result && result.error) {
+      window.vasudha.onEvent({ kind: 'error', text: result.error });
+    }
+  } catch (e) {
+    window.vasudha.onEvent({ kind: 'error', text: String(e) });
+  }
 });
