@@ -69,10 +69,17 @@ def _configure_logging() -> None:
             encoding="utf-8"))
     except Exception:  # noqa: BLE001 - an unwritable data dir must not stop launch
         pass
+    # force=True because basicConfig is a no-op when the root logger already
+    # has a handler, and something in the import chain of a frozen build
+    # installs one. Without it this produced a log file of exactly zero bytes,
+    # which is worse than no log at all: it looks like the app got far enough
+    # to log and had nothing to say.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=handlers)
+        handlers=handlers,
+        force=True)
+    logging.getLogger("vasudha.app").info("--- Vasudha starting ---")
 
 
 _configure_logging()
