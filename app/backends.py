@@ -994,13 +994,33 @@ def select_backend(model_path: Optional[str], ollama_model_hint: str = "vasudha"
                                    n_threads=n_threads or None)
         except Exception as exc:  # noqa: BLE001 - reframed, then re-raised
             name = os.path.basename(model_path or "model")
+            # Order matters. A machine with two GPUs is the more common cause
+            # and the one nobody guesses: llama.cpp's default split_mode is
+            # LAYER, so it spreads the model across *every* visible device.
+            # On a laptop that means the discrete card takes its share and the
+            # integrated one — which allocates from system RAM already full of
+            # browser — fails, failing the whole load while the discrete half
+            # stays allocated. Diagnosed the slow way: the message used to lead
+            # with context size and sent the user to halve a setting that was
+            # never the problem, twice.
+            # Not detected, just always offered when on a GPU: there is no
+            # device enumeration in the Python bindings, and a hint that is
+            # sometimes irrelevant beats one that is confidently wrong.
+            pinned = os.environ.get("GGML_VK_VISIBLE_DEVICES")
+            if gpu and not pinned:
+                hint = ('If this machine has two GPUs, set "gpu_device" to the '
+                        'discrete card (usually 1) in settings.json so the model '
+                        'is not split across both — a split fails whenever the '
+                        'integrated one cannot claim its share of system RAM. '
+                        'Otherwise, reduce the context size.')
+            else:
+                hint = ("The usual fix is a smaller context size in Settings — "
+                        "try halving it.")
             raise RuntimeError(
                 f"{name} would not load at a context size of {n_ctx:,} tokens"
                 + (" on the GPU" if gpu else "")
-                + ". The model, its context and its working memory all have to "
-                "fit at once, so the usual fix is a smaller context size in "
-                "Settings — try halving it. Re-downloading will not help; the "
-                f"file itself is fine. ({exc})") from exc
+                + f". {hint} Re-downloading will not help; the file itself is "
+                f"fine. ({exc})") from exc
 
     if prefer == "llamacpp" and model_path and os.path.exists(model_path):
         return _builtin()
