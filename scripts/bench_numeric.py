@@ -56,6 +56,8 @@ import re
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
+from typing import Optional
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -111,35 +113,70 @@ def grade(text: str, answer: float, tol: float):
     return False, (values[-1] if values else None)
 
 
-def _build_backend(args):
-    """An ollama or built-in backend, from the same selection the app uses."""
+@dataclass
+class ModelSpec:
+    """One thing to evaluate. Either an ollama model name or a GGUF path.
+
+    Exists so scripts/compare_models.py can drive this suite over several
+    models without reconstructing an argparse namespace per model.
+    """
+    label: str
+    model: Optional[str] = None
+    gguf: Optional[str] = None
+    num_ctx: int = 8192
+
+    @classmethod
+    def from_args(cls, args) -> "ModelSpec":
+        return cls(label=args.gguf or args.model, model=args.model,
+                   gguf=args.gguf, num_ctx=args.num_ctx)
+
+
+@dataclass
+class Result:
+    test: dict
+    final: str
+    calls: int
+    elapsed: float
+    ttft: Optional[float]
+    tokens: int
+
+
+def build_backend(spec: ModelSpec, quiet: bool = False):
+    """An ollama or built-in backend, by the same selection the app uses."""
     from app.backends import LlamaCppBackend, OllamaBackend
 
-    if args.gguf:
-        if not os.path.exists(args.gguf):
-            raise SystemExit(f"no such GGUF: {args.gguf}")
+    if spec.gguf:
+        if not os.path.exists(spec.gguf):
+            raise SystemExit(f"no such GGUF: {spec.gguf}")
         gpu = LlamaCppBackend.gpu_available()
-        print(f"  engine: built-in llama.cpp, gpu_offload={gpu}"
-              + ("" if gpu else "  <- CPU-only wheel, expect ~6 tok/s"))
-        return LlamaCppBackend(args.gguf, n_ctx=args.num_ctx,
+        if not quiet:
+            print(f"  engine: built-in llama.cpp, gpu_offload={gpu}"
+                  + ("" if gpu else "  <- CPU-only wheel, expect ~6 tok/s"))
+        return LlamaCppBackend(spec.gguf, n_ctx=spec.num_ctx,
                                n_gpu_layers=-1 if gpu else 0)
 
     served = OllamaBackend.probe()
     if not served:
         raise SystemExit(
             "ollama is not running. Start it, or pass --gguf to use the built-in engine.")
-    match = next((n for n in served if args.model in n), None)
+    match = next((n for n in served if spec.model in n), None)
     if match is None:
-        raise SystemExit(f"ollama is not serving {args.model!r}. Available: {served}")
-    print(f"  engine: ollama, model={match}")
+        raise SystemExit(f"ollama is not serving {spec.model!r}. Available: {served}")
+    if not quiet:
+        print(f"  engine: ollama, model={match}")
     return OllamaBackend(match)
 
 
-def _run_new_loop(args, options):
-    """Drive app/session.py — the loop the desktop app ships."""
+def run_suite(spec: ModelSpec, options: dict, mode: str = "tools",
+              backend=None, quiet: bool = False):
+    """Drive app/session.py — the loop the desktop app ships.
+
+    Yields a Result per problem. `backend` may be supplied by the caller so a
+    comparison run can decide when to load and free each model itself.
+    """
     from app.session import ChatSession
 
-    backend = _build_backend(args)
+    backend = backend or build_backend(spec, quiet=quiet)
     executor = SandboxedCodeExecutor(timeout=15)
     workspace = tempfile.mkdtemp(prefix="vasudha_bench_")
 
@@ -150,7 +187,7 @@ def _run_new_loop(args, options):
         session = ChatSession(backend, system_prompt=SYSTEM, workspace=workspace)
         session.max_iterations = 4
 
-        if args.mode == "notools":
+        if mode == "notools":
             session.schemas, session.tools = [], {}
         else:
             # python_tool only. The app also offers search, fetch, documents and
@@ -179,7 +216,8 @@ def _run_new_loop(args, options):
             elif kind == "error":
                 final = f"[error] {event['text']}"
 
-        yield test, final, calls, time.time() - started, first_token, tokens
+        yield Result(test=test, final=final, calls=calls,
+                     elapsed=time.time() - started, ttft=first_token, tokens=tokens)
 
 
 def _run_legacy_loop(args, options):
@@ -203,7 +241,8 @@ def _run_legacy_loop(args, options):
                 calls += 1
             elif event.kind == "error":
                 final = f"[error] {event.text}"
-        yield test, final, calls, time.time() - started, None, 0
+        yield Result(test=test, final=final, calls=calls,
+                     elapsed=time.time() - started, ttft=None, tokens=0)
 
 
 def main() -> int:
@@ -230,23 +269,26 @@ def main() -> int:
     print(f"{'=' * 72}\n  {label}\n  loop={loop}  mode={args.mode}  "
           f"temp={args.temperature}\n{'=' * 72}")
 
-    runner = _run_legacy_loop if args.legacy else _run_new_loop
+    if args.legacy:
+        results = _run_legacy_loop(args, options)
+    else:
+        results = run_suite(ModelSpec.from_args(args), options, mode=args.mode)
 
     correct = fired = 0
     records = []
-    for test, final, calls, elapsed, ttft, tokens in runner(args, options):
-        good, got = grade(final, test["answer"], test["tol"])
+    for r in results:
+        good, got = grade(r.final, r.test["answer"], r.test["tol"])
         correct += good
-        fired += calls > 0
-        timing = f"{elapsed:.0f}s"
-        if ttft is not None:
-            timing += f" (first token {ttft:.1f}s)"
-        print(f"  [{'PASS' if good else 'FAIL'}] {test['id']:<18} want={test['answer']:<9} "
-              f"got={got}  calls={calls}  {timing}", flush=True)
-        records.append(dict(id=test["id"], ok=bool(good), want=test["answer"], got=got,
-                            calls=calls, seconds=round(elapsed, 1),
-                            ttft=round(ttft, 2) if ttft is not None else None,
-                            final=final))
+        fired += r.calls > 0
+        timing = f"{r.elapsed:.0f}s"
+        if r.ttft is not None:
+            timing += f" (first token {r.ttft:.1f}s)"
+        print(f"  [{'PASS' if good else 'FAIL'}] {r.test['id']:<18} "
+              f"want={r.test['answer']:<9} got={got}  calls={r.calls}  {timing}", flush=True)
+        records.append(dict(id=r.test["id"], ok=bool(good), want=r.test["answer"], got=got,
+                            calls=r.calls, seconds=round(r.elapsed, 1),
+                            ttft=round(r.ttft, 2) if r.ttft is not None else None,
+                            final=r.final))
 
     print(f"\n  --> {correct}/{len(TESTS)} correct, tool fired {fired}/{len(TESTS)}")
     if args.out:

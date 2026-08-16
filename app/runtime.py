@@ -69,6 +69,49 @@ def _bind_std_streams() -> None:
             pass
 
 
+def clear_mark_of_the_web() -> None:
+    """Strip the "downloaded from the internet" flag from the bundle's own files.
+
+    Windows Explorer stamps every file it extracts from a downloaded .zip with a
+    Zone.Identifier alternate data stream (ZoneId=3). The .NET Framework then
+    refuses to resolve entry points in a managed assembly carrying that stream,
+    so pywebview's WinForms/EdgeChromium backend dies during import with:
+
+        RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+        from ...\\pythonnet\\runtime\\Python.Runtime.dll
+
+    which is a crash on launch, before any window appears, for every user who
+    unzips the release the ordinary way. Measured on a real download of the CI
+    artefact: 306 of the bundle's files were flagged. 7-Zip does not propagate
+    the zone, which is exactly why this survives testing on a developer machine
+    that has 7-Zip installed and a local build that was never zipped at all.
+
+    Removing an ADS is deleting the "file:stream" path. Cheap — it touches no
+    file contents and rewrites nothing — so it runs unconditionally on a frozen
+    Windows build rather than trying to detect the failure first.
+
+    The real fix is an Authenticode signature, which exempts the binary from
+    this entirely. Until there is a certificate to sign with, this is the
+    difference between an app that starts and one that does not.
+    """
+    if not is_frozen() or sys.platform != "win32":
+        return
+    root = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    for directory, _subdirs, files in os.walk(root):
+        for name in files:
+            try:
+                os.remove(os.path.join(directory, name) + ":Zone.Identifier")
+            except OSError:
+                # Not flagged, already gone, or locked — all normal. This is a
+                # best-effort repair and must never keep the app from starting.
+                pass
+    # The executable itself sits beside _internal, outside _MEIPASS.
+    try:
+        os.remove(sys.executable + ":Zone.Identifier")
+    except OSError:
+        pass
+
+
 def maybe_run_as_interpreter() -> None:
     """Call first thing in the frozen entry point.
 

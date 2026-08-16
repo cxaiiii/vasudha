@@ -26,9 +26,14 @@ if str(_ROOT) not in sys.path:
 # Must happen before webview is imported: when the frozen executable is invoked
 # as a script runner by the sandbox, it has to behave like a plain interpreter
 # and never initialise a GUI. See app/runtime.py.
-from app.runtime import maybe_run_as_interpreter  # noqa: E402
+from app.runtime import clear_mark_of_the_web, maybe_run_as_interpreter  # noqa: E402
 
 maybe_run_as_interpreter()
+
+# Before `import webview` below, which is where a downloaded-and-unzipped build
+# crashes: .NET will not load pythonnet's assembly while Windows has it flagged
+# as internet-sourced. See clear_mark_of_the_web for the full failure.
+clear_mark_of_the_web()
 
 import json  # noqa: E402
 import logging  # noqa: E402

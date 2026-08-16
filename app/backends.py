@@ -814,6 +814,12 @@ class LlamaCppBackend(Backend):
 
         started = time.time()
         produced = 0
+        #: Decode is timed from the first token, not from the call. Timing the
+        #: whole span folds prefill into the rate and reports something that is
+        #: neither: on this machine a 30-token reply behind a 29s prefill came
+        #: out as "0.9 tok/s" when decode was really about 7. That number is
+        #: what a GPU build gets judged on, so it has to mean one thing.
+        first_token_at = None
         pre_opened = prompt_opens_thinking(prompt)
         filt = StreamFilter(in_think=pre_opened)
 
@@ -832,6 +838,8 @@ class LlamaCppBackend(Backend):
                 delta = chunk["choices"][0].get("text", "")
                 if not delta:
                     continue
+                if first_token_at is None:
+                    first_token_at = time.time()
                 produced += 1
                 for event in filt.feed(delta):
                     yield event
@@ -847,9 +855,13 @@ class LlamaCppBackend(Backend):
         for event in filt.close():
             yield event
 
-        elapsed = time.time() - started
-        if produced and elapsed:
-            self.observed_tps = produced / elapsed
+        # produced - 1: the first token is the one prefill produced, so counting
+        # it against the decode span inflates the rate on short replies.
+        decode_span = (time.time() - first_token_at) if first_token_at else 0.0
+        if produced > 1 and decode_span > 0:
+            self.observed_tps = (produced - 1) / decode_span
+        self.last_prefill_seconds = (
+            (first_token_at - started) if first_token_at else None)
 
         # Re-attach the opener the template supplied, so the non-streaming
         # parse sees the same balanced text the filter did.
