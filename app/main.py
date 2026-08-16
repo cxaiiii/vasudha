@@ -299,12 +299,21 @@ class Api:
 
         fast = isinstance(self._backend, OllamaBackend) or (
             isinstance(self._backend, LlamaCppBackend) and "GPU" in self._backend.display_name)
+        detail = ("Running on your GPU." if fast else
+                  "Running on CPU — answers take longer. Installing Ollama "
+                  "would use your graphics card instead.")
+        # A context smaller than the one in Settings has to be admitted. This
+        # app has already shipped one bug where the engine quietly ran at half
+        # the configured window and nothing said so.
+        downgraded = getattr(self._backend, "downgraded_from", None)
+        actual = getattr(self._backend, "context_limit", None)
+        if downgraded and actual:
+            detail += (f" The {downgraded:,}-token context did not fit in memory, "
+                       f"so this chat holds {actual:,} tokens.")
         self._call_js("onBackend", {
             "label": self._backend.display_name,
             "fast": fast,
-            "detail": ("Running on your GPU." if fast else
-                       "Running on CPU — answers take longer. Installing Ollama "
-                       "would use your graphics card instead."),
+            "detail": detail,
         })
         self._call_js("showFirstRun", False)
         self._push_chat_list()

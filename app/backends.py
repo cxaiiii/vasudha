@@ -42,6 +42,7 @@ restate a number a tool already computed.
 """
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -54,6 +55,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 OLLAMA_BASE = os.environ.get("VASUDHA_OLLAMA_URL", "http://127.0.0.1:11434")
+
+#: Floor for the automatic context downgrade. Below this the model cannot hold
+#: the system prompt, the tool schemas and a useful conversation at once, so a
+#: smaller window is not a degraded product — it is a broken one, and failing
+#: with a clear message beats starting something that cannot answer.
+MIN_CONTEXT = 2048
 
 
 class BackendError(RuntimeError):
@@ -551,6 +558,11 @@ class Backend:
     #: caller reads as "no budget enforcement possible".
     context_limit: Optional[int] = None
 
+    #: Set when the requested context did not fit and a smaller one was used,
+    #: so the UI can say so rather than letting Settings claim a window the
+    #: engine never had.
+    downgraded_from: Optional[int] = None
+
     def close(self) -> None:
         pass
 
@@ -952,13 +964,43 @@ def select_backend(model_path: Optional[str], ollama_model_hint: str = "vasudha"
     the caller can send the user to the first-run download screen.
     """
     def _builtin() -> Backend:
+        """Load the model once, and explain clearly if it will not fit.
+
+        Retrying at a smaller context after a failure does not work and is not
+        worth the code. When Llama.__init__ fails at context creation the model
+        tensors are already on the card, and neither dropping the reference nor
+        gc.collect() gives that memory back — the Vulkan allocation survives
+        until the process exits. Verified on a 6 GB card: after one failed
+        attempt at n_ctx=131072, every retry down to 4096 also fails, on a
+        machine where 16384 loads cleanly from a fresh process. A retry ladder
+        would therefore report "nothing fits" on a configuration that fits fine,
+        which is worse than the single honest failure.
+
+        So: one attempt, and a message naming the real cause. llama.cpp reports
+        this as `Failed to load model from file`, which reads like a corrupt
+        download and sends the user to re-fetch a file that was never at fault.
+        Measured on this hardware: Q4_K_M weights 2.71 GB + KV at 16384 ~2.15 GB
+        + ~1 GB of compute buffer is about 5.9 GB against 6.14 GB of card, so it
+        loses to whatever the desktop is already holding. The same model at 8192
+        fits with room.
+        """
         gpu = LlamaCppBackend.gpu_available()
-        logger.info("using built-in llama.cpp backend (gpu=%s, n_ctx=%s, n_batch=%s)",
+        logger.info("loading model (gpu=%s, n_ctx=%s, n_batch=%s)",
                     gpu, n_ctx, n_batch)
-        return LlamaCppBackend(model_path, n_ctx=n_ctx,
-                               n_gpu_layers=-1 if gpu else 0,
-                               n_batch=n_batch,
-                               n_threads=n_threads or None)
+        try:
+            return LlamaCppBackend(model_path, n_ctx=n_ctx,
+                                   n_gpu_layers=-1 if gpu else 0,
+                                   n_batch=n_batch,
+                                   n_threads=n_threads or None)
+        except Exception as exc:  # noqa: BLE001 - reframed, then re-raised
+            name = os.path.basename(model_path or "model")
+            raise RuntimeError(
+                f"{name} would not load at a context size of {n_ctx:,} tokens"
+                + (" on the GPU" if gpu else "")
+                + ". The model, its context and its working memory all have to "
+                "fit at once, so the usual fix is a smaller context size in "
+                "Settings — try halving it. Re-downloading will not help; the "
+                f"file itself is fine. ({exc})") from exc
 
     if prefer == "llamacpp" and model_path and os.path.exists(model_path):
         return _builtin()
