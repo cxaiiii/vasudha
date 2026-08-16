@@ -876,16 +876,24 @@ class LlamaCppBackend(Backend):
 def set_gpu_device(index: int) -> None:
     """Restrict llama.cpp to one GPU, before its shared library loads.
 
-    A laptop with switchable graphics presents two Vulkan devices and llama.cpp
-    takes device 0, which on this class of machine is the *integrated* GPU:
+    Not about picking the faster card — llama.cpp already prefers it. It is
+    about stopping the *split*. The default split_mode is LAYER, so when a
+    laptop presents both of its GPUs:
 
         0 = AMD Radeon 740M Graphics   uma: 1
         1 = NVIDIA GeForce RTX 4050    uma: 0
 
-    Device 0 is the wrong one and nothing says so — it is fast enough (46.7
-    tok/s measured, 6.7x CPU) to look like the discrete card is working. The
-    integrated part shares system RAM, so it is also bandwidth-starved exactly
-    where decode is bandwidth-bound.
+    layers are distributed across both, and the slow one throttles the whole
+    forward pass. Measured on this machine, prefill:
+
+        both devices visible   2071.8 tok/s
+        NVIDIA only            2636.9 tok/s   (+27%)
+        AMD only                178.5 tok/s
+
+    The AMD figure is the one that matters: it is 15x slower, so any layers
+    landing there cost far more than their share. Note that the startup banner
+    lists devices it *found*, not the device it chose — reading it as a
+    selection is how this got diagnosed backwards the first time.
 
     Filtering by environment variable rather than by main_gpu because it has to
     happen before the ggml backends register at library load; main_gpu is read

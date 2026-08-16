@@ -44,10 +44,11 @@ class Settings:
     # derived rather than guessed at a fixed number.
     n_batch: int = 1024
     n_threads: int = 0
-    # Which GPU to use, when the machine has more than one. -1 = let llama.cpp
-    # choose, which takes device 0 — the integrated GPU on a switchable-graphics
-    # laptop. Set to the discrete card's index (usually 1) to use it instead;
-    # the device list is printed at startup when VASUDHA_DEBUG is set.
+    # Pin work to one GPU when the machine has more than one. -1 = leave it to
+    # llama.cpp, which splits layers across every visible device and lets the
+    # slowest one throttle the pass. Setting the discrete card's index measured
+    # +27% prefill on a 740M/RTX-4050 laptop. The startup banner lists devices
+    # found, not the device chosen — set VASUDHA_DEBUG to see it.
     gpu_device: int = -1
 
     # -- identity --------------------------------------------------------
