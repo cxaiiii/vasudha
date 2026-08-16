@@ -126,6 +126,9 @@ class Api:
         self._session: Optional[ChatSession] = None
         self._maximised = False
         self._needs_setup = False
+        #: True until prepare() has finished once. Guards ready() from
+        #: publishing a half-built state as though it were the final one.
+        self._starting = True
         #: Why the engine would not start, when a model was present but unusable.
         #: Empty means "no model yet", which is the only case the download
         #: screen actually answers.
@@ -161,6 +164,22 @@ class Api:
 
         Touches no JS: the main window's page has not loaded yet.
         """
+        # Release whatever is already loaded, first. prepare() is not only a
+        # startup path — locate_model and the post-download boot both re-enter
+        # it — and a llama.cpp model holds its VRAM until it is closed. Loading
+        # a second 2.7 GB model beside the first one fails on any 6 GB card, and
+        # fails with "Failed to load model from file", which reads as a corrupt
+        # download rather than as "you already have this open".
+        if self._backend is not None:
+            try:
+                self._backend.close()
+            except Exception:  # noqa: BLE001 - closing is best effort
+                logger.debug("closing the previous backend failed", exc_info=True)
+            self._backend = None
+            self._session = None
+            import gc
+            gc.collect()
+
         configured = self._settings.model_path or None
         model_path = Path(configured) if configured and Path(configured).exists() else None
         if model_path is None:
@@ -175,6 +194,7 @@ class Api:
         prefer = None if self._settings.backend == "auto" else self._settings.backend
         if not model_path and not OllamaBackend.probe(self._settings.ollama_url):
             self._needs_setup = True
+            self._starting = False
             return
 
         try:
@@ -207,6 +227,7 @@ class Api:
             self._needs_setup = True
             self._load_error = f"{type(exc).__name__}: {exc}"
             self._failed_model = str(model_path) if model_path else ""
+            self._starting = False
             return
         self._load_error = ""
         self._failed_model = ""
@@ -217,6 +238,7 @@ class Api:
             workspace=str(self._workspace_for(self._chat.id)))
         self._apply_settings()
         self._needs_setup = False
+        self._starting = False
         threading.Thread(target=self._warm, daemon=True).start()
 
     @staticmethod
@@ -268,7 +290,17 @@ class Api:
 
     def ready(self) -> None:
         """Called from the page once it has loaded. Publishes state that
-        prepare() already worked out."""
+        prepare() already worked out — unless it has not finished yet.
+
+        The page loads when the window is *created*, not when it is shown, so
+        this fires while prepare() is still loading a 2.7 GB model behind the
+        splash. Publishing then found self._backend still None and showed the
+        first-run screen on a machine whose model was loading perfectly well —
+        and clicking "I already have the file" on that screen re-entered
+        prepare() and tried to load a second copy alongside the first.
+        """
+        if self._starting:
+            return          # _publish runs at the end of prepare() instead
         self._publish()
 
     def _boot(self) -> None:
@@ -658,7 +690,16 @@ def main() -> int:
             say("Ready")
         except Exception:  # noqa: BLE001 - never strand the user on the splash
             logger.exception("boot failed")
+            api._starting = False
             say("Starting anyway…")
+
+        # ready() returns early while _starting is set, so the final state has
+        # to be published from here. Both orderings are covered: if the page
+        # loaded first its ready() was a no-op and this publishes; if it loads
+        # after, this call fails silently against a page that is not there yet
+        # and ready() publishes instead.
+        api._starting = False
+        api._publish()
 
         remaining = SPLASH_MIN_SECONDS - (time.time() - started)
         if remaining > 0:
