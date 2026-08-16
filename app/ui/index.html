@@ -93,9 +93,17 @@
   <!-- Preview canvas. Hidden until document_tool produces something, so the
        chat keeps the full width until there is a deliverable to show. -->
   <section id="canvas" aria-hidden="true">
+    <!-- Browser chrome, because what sits below is a rendered page. The dots
+         and the address strip are what make a preview read as a document you
+         are looking at rather than as more chat. The address strip is not
+         editable: it reports where this came from, and a bar that looks typeable
+         but is not would be a worse lie than no bar at all. -->
     <div id="canvas-head">
-      <span id="canvas-kind">DOC</span>
-      <span id="canvas-title">Document</span>
+      <span class="canvas-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span id="canvas-address">
+        <span id="canvas-kind">DOC</span>
+        <span id="canvas-title">Document</span>
+      </span>
       <button class="canvas-btn" id="canvas-toggle" title="Switch between preview and source">Source</button>
       <button class="canvas-btn" id="canvas-save" title="Save a copy">Save</button>
       <button class="canvas-btn" id="canvas-close" title="Close preview">&#10005;</button>

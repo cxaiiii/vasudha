@@ -349,3 +349,83 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
 def test_workspace_paths_cannot_escape(tmp_path):
     session = _session([], tmp_path)
     assert "escapes the workspace" in session._write_file("../../evil.txt", "x")
+
+
+# ── browsing ──────────────────────────────────────────────────────────────────
+# No browser is launched here: format_digest is a pure function of the scraped
+# page, which is where the budgeting decisions live and where they can regress.
+
+def _page(text="body text", n_headings=0, n_items=0):
+    return {
+        "title": "A Page", "url": "https://example.com/", "text": text,
+        "headings": [f"h2: Section {i}" for i in range(n_headings)],
+        "items": [f'[ref{i}] link "Item {i}" -> /item/{i}' for i in range(n_items)],
+    }
+
+
+def test_digest_fits_the_tool_result_budget():
+    """A digest over the session's clip limit gets cut down the middle, which
+    truncates the outline and the ref list at once."""
+    from app.session import MAX_TOOL_RESULT_CHARS
+    from web.browser import format_digest
+
+    digest = format_digest(_page(text="x " * 40000, n_headings=40, n_items=200))
+    assert len(digest) <= MAX_TOOL_RESULT_CHARS
+
+
+def test_digest_keeps_structure_and_compresses_prose():
+    """Headings and refs survive; the page text is what gives way."""
+    from web.browser import format_digest
+
+    digest = format_digest(_page(text="prose " * 5000, n_headings=10, n_items=12))
+    for i in range(10):
+        assert f"Section {i}" in digest
+    for i in range(12):
+        assert f"[ref{i}]" in digest
+    assert "more characters on this page" in digest
+
+
+def test_digest_never_squeezes_the_text_away_entirely():
+    """Even a page with a huge control list must still show some prose."""
+    from web.browser import format_digest
+
+    digest = format_digest(_page(text="the answer is 42. " * 200, n_items=200))
+    assert "the answer is 42" in digest
+
+
+def test_digest_survives_an_empty_page():
+    from web.browser import format_digest
+    digest = format_digest({"title": "", "url": "", "text": "", "headings": [], "items": []})
+    assert "(untitled)" in digest
+    assert "still be rendering" in digest
+
+
+@pytest.mark.parametrize("given,expected", [
+    ("ref3", 3), ("ref_3", 3), ("3", 3), ("REF12", 12), ("ref 7", 7),
+    ("", None), ("nope", None), (None, None),
+])
+def test_ref_parsing_is_forgiving(given, expected):
+    """Models are inconsistent about the prefix, and rejecting a valid intent
+    over punctuation costs a whole turn."""
+    from web.browser import _ref_index
+    assert _ref_index(given) == expected
+
+
+def test_browse_tool_rejects_bad_input_without_launching(tmp_path):
+    session = _session([], tmp_path)
+    assert "http(s) url" in session._browse_tool(action="open", url="notaurl")
+    assert "unknown action" in session._browse_tool(action="teleport")
+    assert "needs a ref" in session._browse_tool(action="click")
+    # A malformed call must not be the reason a headless Chromium gets launched.
+    assert session._browser is None
+
+
+def test_browser_schema_is_dropped_when_playwright_is_absent():
+    """An unusable schema costs ~200 tokens of every prompt and invites the
+    model to spend a turn discovering it does not work."""
+    from app.session import default_schemas
+    names = [s["function"]["name"] for s in default_schemas(include_browser=False)]
+    assert "browse_tool" not in names
+    assert "fetch_tool" in names          # the static fallback stays
+    assert "browse_tool" in [s["function"]["name"]
+                             for s in default_schemas(include_browser=True)]

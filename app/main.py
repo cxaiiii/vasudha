@@ -259,8 +259,20 @@ class Api:
             self._window.minimize()
 
     def close(self) -> None:
+        # Before destroying the window: a headless Chromium is a separate
+        # process and survives the one that forgot about it, leaving the user
+        # with a browser they cannot see and did not know they started.
+        self.shutdown()
         if self._window:
             self._window.destroy()
+
+    def shutdown(self) -> None:
+        """Release anything that outlives this process if left alone."""
+        if self._session:
+            try:
+                self._session.close()
+            except Exception:  # noqa: BLE001 - never block the window closing
+                logger.debug("session close failed", exc_info=True)
 
     def get_bounds(self) -> dict:
         """Current position and size, so a resize drag can be computed against
@@ -489,6 +501,10 @@ class Api:
         self._chat = Chat()
         if self._session:
             self._session.reset()
+            # Drop the browser with the conversation. Carrying its cookies and
+            # logged-in sessions into an unrelated chat is a privacy leak, not
+            # a convenience.
+            self._session.close()
         self._rebind_workspace()
         self._call_js("loadChat", {"events": []})
         self._push_chat_list()
@@ -576,7 +592,12 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             logger.debug("splash already closed", exc_info=True)
 
+    # Also on the window's own close event, since the titlebar X and the OS
+    # both bypass Api.close().
+    window.events.closing += api.shutdown
+
     webview.start(boot, debug=bool(os.environ.get("VASUDHA_DEBUG")))
+    api.shutdown()          # belt and braces: normal exit path
     return 0
 
 

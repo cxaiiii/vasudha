@@ -688,8 +688,14 @@ function showDocument(doc) {
   // model said about its sources.
   $('#canvas-warning').classList.toggle('show', doc.sourced === false);
 
-  $('#canvas-title').textContent = doc.title || 'Document';
-  $('#canvas-kind').textContent = { markdown: 'DOC', csv: 'SHEET', html: 'PAGE' }[doc.format] || 'DOC';
+  /* The address strip shows where this actually came from. For a document the
+     model wrote that is the file it was saved to; a bare title would look like
+     a URL slot with nothing in it. */
+  const kindEl = $('#canvas-kind');
+  kindEl.textContent = { markdown: 'DOC', csv: 'SHEET', html: 'PAGE' }[doc.format] || 'DOC';
+  kindEl.classList.toggle('web', doc.format === 'web');
+  $('#canvas-title').textContent = doc.path || doc.filename || doc.title || 'Document';
+  $('#canvas-title').title = doc.path || doc.title || '';
   $('#canvas-source').querySelector('code').textContent = doc.content || '';
 
   if (doc.format === 'csv') {

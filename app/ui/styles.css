@@ -799,31 +799,73 @@ body.reduce-motion .streaming::after { content: none; }
 }
 #canvas[aria-hidden="true"] { display: none; }
 
+/* Browser chrome. Slightly darker than the page below it, the way a real
+   window's titlebar is, so the boundary reads without needing a heavy rule. */
 #canvas-head {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 9px 12px;
+  background: var(--paper-deep);
   border-bottom: 1px solid var(--stroke-soft);
 }
+
+.canvas-dots {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding-right: 2px;
+}
+.canvas-dots i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--stroke);
+}
+/* Tinted, not the literal macOS traffic lights: these are decoration and do
+   nothing, and colouring them red/amber/green would promise buttons. */
+.canvas-dots i:nth-child(1) { background: rgba(249, 62, 0, 0.35); }
+.canvas-dots i:nth-child(2) { background: rgba(239, 182, 139, 0.75); }
+.canvas-dots i:nth-child(3) { background: rgba(44, 116, 48, 0.32); }
+
+/* The address strip. Inset and recessed so it reads as a field, but with a
+   default cursor — it reports provenance, it does not accept input. */
+#canvas-address {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--paper);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
 #canvas-kind {
+  flex: none;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 9.5px;
   letter-spacing: 0.06em;
   background: var(--forest);
   color: #fff;
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: var(--radius-pill);
 }
+/* A browsed page is a different kind of thing from a document the model wrote,
+   and the badge is where that distinction belongs. */
+#canvas-kind.web { background: var(--saffron); }
 #canvas-title {
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-soft);
   flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  direction: ltr;
 }
 .canvas-btn {
   flex: none;

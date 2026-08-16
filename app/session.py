@@ -72,8 +72,18 @@ def _unit_rule(what: str) -> str:
             "not print(sigma). Never leave a unit conversion to be done afterwards.")
 
 
-def default_schemas() -> list[dict]:
-    return [
+def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
+    """Tool schemas for one session.
+
+    browse_tool is dropped when Playwright is not installed rather than left in
+    to fail: an unusable schema costs ~200 tokens of every prompt and invites
+    the model to spend a turn discovering it does not work.
+    """
+    if include_browser is None:
+        from web.browser import playwright_available
+        include_browser = playwright_available()
+
+    schemas = [
         {
             "type": "function",
             "function": {
@@ -153,6 +163,40 @@ def default_schemas() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "browse_tool",
+                "description": (
+                    "Open a page in a real browser and read it AFTER its JavaScript "
+                    "has run, then click links and fill in fields. Use this instead of "
+                    "fetch_tool when a page needs a browser: documentation sites, "
+                    "anything interactive, search results you want to follow, or when "
+                    "fetch_tool came back empty or looked like a shell. Returns the "
+                    "page's text plus a numbered list of things you can interact with; "
+                    "pass one of those refs back to click or type."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["open", "read", "click", "type", "back"],
+                            "description": "open a url; read the current page again; "
+                                           "click a ref; type into a ref; go back.",
+                        },
+                        "url": {"type": "string", "description": "For action=open."},
+                        "ref": {"type": "string",
+                                "description": "For click/type: a ref from the last "
+                                               "digest, e.g. 'ref3'."},
+                        "text": {"type": "string", "description": "For action=type."},
+                        "submit": {"type": "boolean",
+                                   "description": "For action=type: press Enter after "
+                                                  "typing. Use for search boxes."},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "write_file",
                 "description": (
                     "Write a text file into the workspace. Use for source code, "
@@ -220,6 +264,10 @@ def default_schemas() -> list[dict]:
         },
     ]
 
+    if not include_browser:
+        schemas = [s for s in schemas if s["function"]["name"] != "browse_tool"]
+    return schemas
+
 
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.M)
 _TABLE_SEP = re.compile(r"^\s*\|[\s:|-]+\|\s*$", re.M)
@@ -278,6 +326,10 @@ class ChatSession:
         self._fetcher = PageFetcher(timeout=10, max_chars=4000)
         self._workspace = workspace
         self._file_tools = None
+        #: Lazily launched on the first browse_tool call, then kept for the rest
+        #: of the chat — research is several steps and relaunching would drop
+        #: the cookies that make a multi-page flow work.
+        self._browser = None
         #: filled by document_tool so the UI can render the canvas
         self.last_document: Optional[dict] = None
         #: what this turn really consulted — the basis for provenance, since
@@ -289,6 +341,7 @@ class ChatSession:
             "search_tool": self._search_tool,
             "fetch_tool": self._fetch_tool,
             "document_tool": self._document_tool,
+            "browse_tool": self._browse_tool,
             "write_file": self._write_file,
             "read_file": self._read_file,
             "list_files": self._list_files,
@@ -335,6 +388,64 @@ class ChatSession:
         result = self._fetcher.fetch(url)
         self._fetches.append(url.strip())
         return result
+
+    # -- browsing ----------------------------------------------------------
+
+    def _browse_tool(self, action: str = "open", url: str = "", ref: str = "",
+                     text: str = "", submit: bool = False, **_: object) -> str:
+        """Drive a real browser. Every branch returns a page digest or an error
+        the model can act on — never a bare exception, which would end the turn.
+        """
+        from web.browser import BrowserUnavailable, PageBrowser
+
+        action = (action or "open").strip().lower()
+
+        # Validate before touching the browser at all: a malformed call should
+        # not be the reason a headless Chromium gets launched.
+        if action not in ("open", "read", "click", "type", "back"):
+            return (f"[error] unknown action {action!r}. "
+                    "Use open, read, click, type or back.")
+        if action == "open" and not url.lower().startswith(("http://", "https://")):
+            return f"[error] browse_tool needs an http(s) url, got {url!r}"
+        if action in ("click", "type") and not ref:
+            return f"[error] action={action} needs a ref from the last page digest"
+
+        try:
+            if self._browser is None:
+                self._browser = PageBrowser()
+
+            if action == "open":
+                result = self._browser.navigate(url)
+            elif action == "read":
+                result = self._browser.digest()
+            elif action == "click":
+                result = self._browser.click(ref)
+            elif action == "type":
+                result = self._browser.type_text(ref, text, submit=bool(submit))
+            else:   # back — the action set was validated above
+                result = self._browser.back()
+        except BrowserUnavailable as exc:
+            return f"[error] {exc}"
+        except ValueError as exc:
+            return f"[error] {exc}"
+        except Exception as exc:  # noqa: BLE001 - a dead page must not kill the turn
+            logger.exception("browse_tool failed")
+            return (f"[error] the browser could not complete that: {exc}. "
+                    "Try fetch_tool for a static page, or open a different url.")
+
+        # Provenance counts a browsed page the same as a fetched one: it was
+        # genuinely read, which is the only thing the footer claims.
+        current = self._browser.current_url
+        if current and current not in self._fetches:
+            self._fetches.append(current)
+        return result
+
+    def close(self) -> None:
+        """Release the browser. A headless Chromium outlives the process that
+        forgot it, so this is not merely tidy."""
+        if self._browser is not None:
+            self._browser.close()
+            self._browser = None
 
     # -- workspace files ---------------------------------------------------
     # WorkspaceFileTools already resolves every path against the workspace root
