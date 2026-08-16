@@ -59,7 +59,12 @@ class Settings:
     # -- behaviour -------------------------------------------------------
     show_reasoning: bool = False   # expand <think> blocks by default
     open_tool_cards: bool = True   # expand the code+stdout evidence by default
-    tool_timeout: int = 15         # seconds a python_tool run may take
+    # Seconds a python_tool run may take. 15 was sized for arithmetic and is
+    # too tight now that pip_tool exists: importing a freshly installed package
+    # for the first time can take longer than that on its own (textblob pulls in
+    # nltk and its corpora), and the model reads the timeout as "my code is
+    # wrong" and rewrites working code.
+    tool_timeout: int = 30
     max_iterations: int = 12       # tool calls per turn before giving up
 
     # -- interface -------------------------------------------------------

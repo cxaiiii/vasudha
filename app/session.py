@@ -69,7 +69,14 @@ def _unit_rule(what: str) -> str:
     return (f"Compute {what} in a real Python sandbox and return its stdout. "
             "The code MUST print the final value already converted to the unit the "
             "question asks for, together with that unit — e.g. print(f'{sigma/1e6:.4g} MPa'), "
-            "not print(sigma). Never leave a unit conversion to be done afterwards.")
+            "not print(sigma). Never leave a unit conversion to be done afterwards. "
+            # Watched failure: a model defined `reviews` in one call, referred to
+            # it in the next, and spent four turns on the NameError. Nothing in
+            # the schema told it the process does not persist, so it reasonably
+            # assumed a REPL.
+            "EACH CALL RUNS IN A FRESH PROCESS: variables, imports and state from "
+            "an earlier call are gone. Every script must be self-contained. Files "
+            "you wrote to the workspace do persist — read them back with open().")
 
 
 def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
@@ -157,6 +164,50 @@ def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
                                     "description": "The complete document body in that format."},
                     },
                     "required": ["title", "format", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "pip_tool",
+                "description": (
+                    "Install Python packages so python_tool can import them. The "
+                    "sandbox has the standard library and little else, so install "
+                    "before importing anything third-party rather than guessing "
+                    "whether it is there. Installed once, available in every later "
+                    "call and every later chat."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "packages": {
+                            "type": "string",
+                            "description": "Space- or comma-separated names, "
+                                           "optionally pinned: 'textblob' or "
+                                           "'pandas numpy' or 'requests==2.31.0'.",
+                        },
+                    },
+                    "required": ["packages"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "shell_tool",
+                "description": (
+                    "Run one shell command in the workspace directory. Use for "
+                    "things the other tools do not cover — inspecting files, "
+                    "running a build or a test command, checking what is installed. "
+                    "Not for interactive programs: stdin is closed, so anything "
+                    "that waits for input is killed on timeout."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string",
+                                    "description": "The command line to run."},
+                    },
+                    "required": ["command"],
                 },
             },
         },
@@ -326,6 +377,8 @@ class ChatSession:
         self._fetcher = PageFetcher(timeout=10, max_chars=4000)
         self._workspace = workspace
         self._file_tools = None
+        self._installer = None
+        self._shell = None
         #: Lazily launched on the first browse_tool call, then kept for the rest
         #: of the chat — research is several steps and relaunching would drop
         #: the cookies that make a multi-page flow work.
@@ -342,6 +395,8 @@ class ChatSession:
             "fetch_tool": self._fetch_tool,
             "document_tool": self._document_tool,
             "browse_tool": self._browse_tool,
+            "pip_tool": self._pip_tool,
+            "shell_tool": self._shell_tool,
             "write_file": self._write_file,
             "read_file": self._read_file,
             "list_files": self._list_files,
@@ -372,6 +427,20 @@ class ChatSession:
 
     def _python_tool(self, code: str = "", **_: object) -> str:
         return self._executor.execute_python(code, cwd=self._workspace)
+
+    def _pip_tool(self, packages: str = "", **_: object) -> str:
+        from web.tools import PackageInstaller
+        if self._installer is None:
+            self._installer = PackageInstaller()
+        return self._installer.install(packages)
+
+    def _shell_tool(self, command: str = "", **_: object) -> str:
+        from web.tools import ShellRunner
+        if self._shell is None:
+            self._shell = ShellRunner(timeout=max(self._executor.timeout * 4, 60))
+        # Runs in the workspace, so `dir`/`ls` shows the model its own files and
+        # a relative path means the same thing here as in write_file.
+        return self._shell.run(command, cwd=self._files().workspace.as_posix())
 
     def _search_tool(self, query: str = "", **_: object) -> str:
         """Real DuckDuckGo search. This is the one tool that sends anything off

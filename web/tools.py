@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -38,6 +39,154 @@ def _strip_code_fences(text: str) -> str:
     return "\n".join(lines)
 
 
+def packages_dir() -> str:
+    """Where pip_tool installs, and where the sandbox looks for imports.
+
+    One directory for the whole app rather than one per chat: a package is
+    expensive to fetch and identical whoever asked for it, and re-downloading
+    numpy for every new conversation would be its own bug.
+    """
+    try:
+        from app.paths import app_data_dir
+        root = app_data_dir() / "packages"
+    except ImportError:
+        root = Path(tempfile.gettempdir()) / "vasudha_packages"
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root)
+
+
+def _sandbox_env(work_dir: str) -> dict:
+    """Environment for anything the model runs.
+
+    USERPROFILE/HOME/HOMEDRIVE/HOMEPATH are deliberately pointed at the sandbox
+    dir itself, not left unset: without them, os.path.expanduser("~") on Windows
+    silently returns "~" unexpanded (documented behavior, not an error) instead
+    of raising — code that assumes a home directory then writes to a literal "~"
+    path inside the sandbox with no indication anything went wrong. Giving it a
+    real but contained home means "~" resolves somewhere that exists, without
+    granting access to the real user profile.
+
+    PYTHONPATH carries the pip_tool install directory, which is what makes an
+    installed package importable on the *next* python_tool call.
+    """
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+        "COMSPEC": os.environ.get("COMSPEC", ""),
+        "PATHEXT": os.environ.get("PATHEXT", ""),
+        "TEMP": work_dir,
+        "TMP": work_dir,
+        "USERPROFILE": work_dir,
+        "HOME": work_dir,
+        "HOMEDRIVE": os.path.splitdrive(work_dir)[0],
+        "HOMEPATH": os.path.splitdrive(work_dir)[1],
+        "PYTHONPATH": packages_dir(),
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+
+#: A package name pip will accept, and nothing else. Not a general argument
+#: parser: allowing arbitrary text here would let a request smuggle in
+#: --index-url and fetch from somewhere other than PyPI.
+_PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+                         r"([=<>!~]=?[A-Za-z0-9.*+!-]+)?$")
+
+
+class PackageInstaller:
+    """pip install, into a directory the sandbox can import from.
+
+    Exists because the sandbox ships the standard library and little else, and
+    a model that reaches for textblob or pandas otherwise spends its turns
+    discovering their absence and inventing worse substitutes — which is
+    exactly what one user watched it do.
+    """
+
+    def __init__(self, timeout: int = 180) -> None:
+        self.timeout = timeout
+
+    def install(self, packages: str) -> str:
+        names = [p.strip() for p in re.split(r"[\s,]+", packages or "") if p.strip()]
+        if not names:
+            return "[error] pip_tool needs at least one package name"
+        bad = [n for n in names if not _PACKAGE_RE.match(n)]
+        if bad:
+            return (f"[error] not valid package names: {', '.join(bad)}. "
+                    "Give plain names or name==version, nothing else.")
+
+        target = packages_dir()
+        argv = _interpreter_argv()
+        # A frozen build's "interpreter" is Vasudha.exe plus a run-a-script
+        # flag, which cannot take `-m pip`, and no pip is bundled anyway. Say
+        # so plainly: a mystery failure here would send the model into exactly
+        # the guessing loop this tool exists to prevent.
+        if len(argv) > 1:
+            return ("[error] this build cannot install packages — it ships a Python "
+                    "runtime without pip. Use the standard library instead: math, "
+                    "statistics, decimal, fractions, json, re and csv are available.")
+
+        try:
+            started = time.time()
+            process = subprocess.run(
+                argv + ["-m", "pip", "install", "--target", target,
+                        "--no-input", "--disable-pip-version-check", "--quiet",
+                        *names],
+                capture_output=True, text=True, timeout=self.timeout,
+                env={**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+            elapsed = time.time() - started
+        except subprocess.TimeoutExpired:
+            return f"[error] pip install timed out after {self.timeout}s"
+        except Exception as exc:  # noqa: BLE001
+            return f"[error] could not run pip: {exc}"
+
+        if process.returncode != 0:
+            detail = (process.stderr or process.stdout or "").strip()
+            return f"[error] pip install failed:\n{detail[-1500:]}"
+        return (f"[installed {', '.join(names)} in {elapsed:.1f}s] "
+                "They are importable from the next python_tool call onwards.")
+
+
+class ShellRunner:
+    """Run a shell command in the workspace.
+
+    Same containment as python_tool — workspace cwd, stripped environment,
+    hard timeout — because it is the same risk: this app already executes
+    arbitrary generated Python, so a shell is not a new category of power. It
+    is bounded rather than free: no interactive programs, and a timeout that
+    kills anything waiting on input it will never get.
+    """
+
+    def __init__(self, timeout: int = 60) -> None:
+        self.timeout = timeout
+
+    def run(self, command: str, cwd: Optional[str] = None) -> str:
+        command = (command or "").strip()
+        if not command:
+            return "[error] shell_tool needs a command"
+
+        work_dir = cwd or tempfile.mkdtemp(prefix="vasudha_shell_")
+        try:
+            started = time.time()
+            process = subprocess.run(
+                command, shell=True, cwd=work_dir, env=_sandbox_env(work_dir),
+                capture_output=True, text=True, timeout=self.timeout,
+                stdin=subprocess.DEVNULL)
+            elapsed = time.time() - started
+        except subprocess.TimeoutExpired:
+            return (f"[error] command exceeded {self.timeout}s and was killed. "
+                    "Interactive commands never finish here — stdin is closed.")
+        except Exception as exc:  # noqa: BLE001
+            return f"[error] could not run the command: {exc}"
+
+        chunks = []
+        if process.stdout.strip():
+            chunks.append(process.stdout.strip())
+        if process.stderr.strip():
+            chunks.append(f"[stderr]\n{process.stderr.strip()}")
+        body = "\n\n".join(chunks) or "(no output)"
+        return f"{body}\n\n[exit {process.returncode}, {elapsed:.2f}s]"
+
+
 class SandboxedCodeExecutor:
     """
     Safely executes Python code inside a sandboxed workspace. Strips away
@@ -55,20 +204,27 @@ class SandboxedCodeExecutor:
         it up — this is the project-creation path, where write_file wrote
         real files there and this code needs to see them (and anything it
         writes itself needs to still be there for the *next* python_tool
-        call). Cleanup for that case is WorkspaceManager's TTL sweep, not
-        per-call, since the whole point is persistence across calls."""
+        call).
+
+        The script itself is written OUTSIDE the workspace and passed by
+        absolute path. It used to live at <workspace>/_exec_script.py, which
+        collided with the model in a way that cost a real user four turns: a
+        traceback named the file, the model tried to read_file it (already
+        deleted, since each run removes it), then write_file'd its own version
+        of it — and the next python_tool call silently overwrote that with the
+        new snippet. Keeping the scratch file out of the workspace makes the
+        collision impossible rather than merely unlikely.
+        """
         clean_code = _strip_code_fences(code_str)
 
+        scratch_dir = tempfile.mkdtemp(prefix="vasudha_exec_")
+        script_path = os.path.join(scratch_dir, "script.py")
+
         if cwd is not None:
-            temp_dir = cwd
-            # Leading underscore keeps this out of the way of whatever
-            # filenames the model actually chose for the project, and
-            # signals "generated scratch file" if the model lists the dir.
-            script_path = os.path.join(temp_dir, "_exec_script.py")
-            persistent = True
+            temp_dir = cwd          # where the code runs and writes its files
+            persistent = True       # the workspace outlives this call
         else:
             temp_dir = tempfile.mkdtemp(prefix="vasudha_sandbox_")
-            script_path = os.path.join(temp_dir, "exec_script.py")
             persistent = False
 
         try:
@@ -85,17 +241,7 @@ class SandboxedCodeExecutor:
             # anything went wrong. Giving it a real (but still contained)
             # home directory means "~" resolves to somewhere that actually
             # exists, without granting access to the real user profile.
-            safe_env = {
-                "PATH": os.environ.get("PATH", ""),
-                "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
-                "TEMP": temp_dir,
-                "TMP": temp_dir,
-                "USERPROFILE": temp_dir,
-                "HOME": temp_dir,
-                "HOMEDRIVE": os.path.splitdrive(temp_dir)[0],
-                "HOMEPATH": os.path.splitdrive(temp_dir)[1],
-                "PYTHONUNBUFFERED": "1"
-            }
+            safe_env = _sandbox_env(temp_dir)
 
             start_time = time.time()
             process = subprocess.run(
@@ -124,15 +270,8 @@ class SandboxedCodeExecutor:
         except Exception as e:
             return f"[System Error during execution]: {str(e)}"
         finally:
-            if persistent:
-                # Only remove the scratch script — everything else in the
-                # workspace is the project itself and must survive for the
-                # next tool call.
-                try:
-                    os.remove(script_path)
-                except OSError:
-                    pass
-            else:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+            if not persistent:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -322,8 +461,11 @@ class WorkspaceFileTools:
             return f"[Error: {rel_path} does not exist]"
         entries = []
         for p in sorted(target.rglob("*")):
-            if p.name == "_exec_script.py":
-                continue  # the executor's own scratch file, not part of the project
+            # No longer skips "_exec_script.py". The executor used to write its
+            # scratch script there and this hid it; the script now lives outside
+            # the workspace entirely, so a file with that name is the model's
+            # own and hiding it would make write_file look like it silently
+            # failed.
             kind = "dir " if p.is_dir() else "file"
             entries.append(f"{kind}  {p.relative_to(self.workspace)}")
         if not entries:
