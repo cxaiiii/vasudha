@@ -133,10 +133,19 @@ class Api:
             return
 
         try:
+            # num_ctx has to reach the engine here, at construction: the
+            # built-in backend's window is fixed when the model is loaded, and
+            # passing it only in per-request options (which is all that used to
+            # happen) left it at the 8192 default while the user's setting said
+            # 16384. Nothing reported the mismatch — llama.cpp simply shifted
+            # the oldest tokens out mid-conversation.
             self._backend = select_backend(
                 str(model_path) if model_path else None,
                 ollama_model_hint=self._settings.ollama_model or "vasudha",
-                prefer=prefer)
+                prefer=prefer,
+                n_ctx=self._settings.num_ctx,
+                n_batch=self._settings.n_batch,
+                n_threads=self._settings.n_threads)
         except RuntimeError:
             self._needs_setup = True
             return
@@ -146,6 +155,30 @@ class Api:
             system_prompt=personas.build_system_prompt(self._settings.persona, CORE_RULES))
         self._apply_settings()
         self._needs_setup = False
+        threading.Thread(target=self._warm, daemon=True).start()
+
+    def _warm(self) -> None:
+        """Prefill the static prompt prefix while the user is still reading the
+        window.
+
+        Deliberately not on the splash: warming costs about as long as one
+        prefill (~37s on CPU for this prompt), and a 40-second splash to save
+        40 seconds later is not a saving. On a background thread the cost is
+        hidden entirely if the user takes that long to type, and if they do not,
+        it is the same work their question would have paid for anyway.
+
+        Takes the same lock as a turn, so a question asked mid-warm waits
+        rather than driving the same llama context from two threads.
+        """
+        if not self._session or not self._backend:
+            return
+        try:
+            with self._lock:
+                self._backend.warm(
+                    [{"role": "system", "content": self._session.system_prompt}],
+                    self._session.schemas, self._session.options)
+        except Exception:  # noqa: BLE001 - an optimisation, never a precondition
+            logger.debug("warm failed", exc_info=True)
 
     def ready(self) -> None:
         """Called from the page once it has loaded. Publishes state that
@@ -358,10 +391,43 @@ class Api:
         with self._lock:
             self._chats.title_for(self._chat, text)
             self._chat.events.append({"kind": "user", "text": text})
+            # Each _emit is an evaluate_js round trip across the webview
+            # bridge. One per token is affordable at 6 tok/s on CPU and is not
+            # at 60 tok/s on a GPU, where the bridge, not the model, becomes
+            # the bottleneck and the text arrives in visible steps. Deltas are
+            # therefore coalesced into ~50 ms batches, which is below the
+            # threshold where streaming stops reading as continuous anyway.
+            buffered: dict[str, list[str]] = {"token": [], "thinking_token": []}
+            last_flush = time.monotonic()
+
+            def flush() -> None:
+                nonlocal last_flush
+                for kind, parts in buffered.items():
+                    if parts:
+                        self._emit({"kind": kind, "text": "".join(parts)})
+                        parts.clear()
+                last_flush = time.monotonic()
+
             try:
                 for event in self._session.ask(text):
+                    kind = event.get("kind")
+
+                    # Token deltas are for the live view only. The finished
+                    # 'text' event carries the same content, so persisting both
+                    # would store every reply twice — once as prose and once as
+                    # a few hundred one-word fragments — and replay it doubled
+                    # when the chat is reopened.
+                    if kind in ("token", "thinking_token"):
+                        buffered[kind].append(event.get("text", ""))
+                        if time.monotonic() - last_flush >= 0.05:
+                            flush()
+                        continue
+
+                    flush()   # ordering: never let a delta land after the
+                              # event that concludes it
                     self._chat.events.append(event)
                     self._emit(event)
+                flush()
             except Exception as exc:  # noqa: BLE001 - never kill the UI thread
                 logger.exception("turn failed")
                 self._emit({"kind": "error", "text": str(exc)})

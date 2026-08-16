@@ -47,7 +47,12 @@ datas = [
 # the window silently fails to create a browser control.
 datas += collect_data_files("webview")
 
-# llama-cpp-python carries its own compiled backend.
+# llama-cpp-python carries its own compiled backend. With the Vulkan wheel that
+# is several shared libraries, not one: llama.cpp splits its GPU backends into
+# separate ggml-vulkan / ggml-cpu modules and loads them by name at runtime, so
+# collect_dynamic_libs (which walks the package directory) is what keeps them
+# together. Missing one does not fail the build — it fails at first launch, as a
+# silent fallback to CPU.
 datas += collect_data_files("llama_cpp")
 binaries = collect_dynamic_libs("llama_cpp")
 
@@ -62,6 +67,13 @@ hiddenimports += [
     "bs4",
     "ddgs",
     "requests",
+    # jinja2 renders the GGUF's own chat template, which is what lets this app
+    # load a model other than the one it ships with. Imported by name inside
+    # app/backends.py, so PyInstaller does not see it statically.
+    "jinja2",
+    # Physical-core detection for n_threads. Optional at runtime (there is a
+    # fallback), bundled because the fallback is measurably worse.
+    "psutil",
     # Available to sandboxed python_tool runs, since a frozen build only has
     # what is bundled. Stdlib maths is the common case for this product.
     "decimal",

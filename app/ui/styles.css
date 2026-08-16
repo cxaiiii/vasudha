@@ -294,6 +294,26 @@ body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after 
   white-space: pre-wrap;
   word-wrap: break-word;
 }
+/* Text still arriving. Inherits the bubble's own wrapping so the swap to
+   rendered markdown does not reflow the paragraph under the reader's eyes. */
+.streaming {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+/* A caret, so a slow model looks like it is working rather than stalled. At
+   5-7 tok/s the gap between tokens is long enough to read as a freeze. */
+.streaming::after {
+  content: '▌';
+  margin-left: 1px;
+  opacity: 0.45;
+  animation: caret 1.05s steps(1) infinite;
+}
+@keyframes caret { 50% { opacity: 0; } }
+/* The global reduce-motion rule collapses animation-duration to 0.01ms, which
+   would leave the caret frozen mid-blink at whatever opacity it happened to
+   hold. Hide it outright instead. */
+body.reduce-motion .streaming::after { content: none; }
+
 .msg.user .bubble {
   background: var(--saffron);
   color: #fff;

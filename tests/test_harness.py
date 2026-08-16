@@ -1,0 +1,351 @@
+"""Tests for the model-agnostic parts of the desktop harness.
+
+These exist because the harness is used to compare models, not only to run the
+bundled one. Every case below is a format some real model family actually
+emits; a new model that fails here fails visibly at test time rather than by
+quietly never calling a tool.
+
+No model is loaded: everything here is string handling, which is where the
+model-specific assumptions used to live.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.backends import (
+    Completion,
+    StreamFilter,
+    ToolCall,
+    parse_tool_calls,
+    prompt_opens_thinking,
+    render_chatml,
+    split_thinking,
+)
+
+
+# ── tool-call formats ─────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("label,raw,expected_name,expected_args", [
+    ("qwen3 xml",
+     "<tool_call>\n<function=python_tool>\n<parameter=code>\nprint(1)\n"
+     "</parameter>\n</function>\n</tool_call>",
+     "python_tool", {"code": "print(1)"}),
+    ("hermes / qwen2.5 json",
+     '<tool_call>\n{"name": "python_tool", "arguments": {"code": "print(1)"}}\n</tool_call>',
+     "python_tool", {"code": "print(1)"}),
+    ("parameters instead of arguments",
+     '<tool_call>{"name":"search_tool","parameters":{"query":"x"}}</tool_call>',
+     "search_tool", {"query": "x"}),
+    ("llama pipe tag",
+     '<|tool_call|>{"name":"python_tool","arguments":{"code":"1"}}',
+     "python_tool", {"code": "1"}),
+    ("fenced json",
+     '```json\n{"name":"fetch_tool","arguments":{"url":"http://x"}}\n```',
+     "fetch_tool", {"url": "http://x"}),
+    ("bare json, no wrapper",
+     '{"name": "python_tool", "arguments": {"code": "print(2)"}}',
+     "python_tool", {"code": "print(2)"}),
+    ("nested function object",
+     '<tool_call>{"function":{"name":"read_file","arguments":{"path":"a.py"}}}</tool_call>',
+     "read_file", {"path": "a.py"}),
+])
+def test_tool_formats(label, raw, expected_name, expected_args):
+    _, _, calls = parse_tool_calls(raw)
+    assert len(calls) == 1, f"{label}: expected one call, got {calls}"
+    assert calls[0].name == expected_name
+    assert calls[0].args == expected_args
+
+
+def test_multiple_calls_in_one_turn():
+    raw = ('<tool_call>{"name":"a","arguments":{}}</tool_call>'
+           '<tool_call>{"name":"b","arguments":{}}</tool_call>')
+    _, _, calls = parse_tool_calls(raw)
+    assert [c.name for c in calls] == ["a", "b"]
+    # Distinct ids, or the loop cannot say which result answers which call.
+    assert len({c.id for c in calls}) == 2
+
+
+def test_concatenated_calls_without_separator():
+    """Some fine-tunes emit two objects back to back inside one block."""
+    raw = '<tool_call>{"name":"a","arguments":{}}{"name":"b","arguments":{}}</tool_call>'
+    _, _, calls = parse_tool_calls(raw)
+    assert [c.name for c in calls] == ["a", "b"]
+
+
+def test_json_answer_is_not_mistaken_for_a_tool_call():
+    """A model asked to reply in JSON must not have its answer eaten.
+
+    This is the failure mode that makes a permissive bare-JSON parser
+    dangerous, so the parser requires a "name" key before it will treat an
+    unwrapped object as a call.
+    """
+    raw = '{"result": 42, "unit": "mm"}'
+    text, _, calls = parse_tool_calls(raw)
+    assert calls == []
+    assert text == raw
+
+
+def test_prose_is_left_alone():
+    text, thinking, calls = parse_tool_calls("The deflection is 14.07 mm.")
+    assert (text, thinking, calls) == ("The deflection is 14.07 mm.", "", [])
+
+
+# ── reasoning blocks ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("tag", ["think", "thinking", "reasoning", "reason"])
+def test_reasoning_tags(tag):
+    text, thinking = split_thinking(f"<{tag}>working it out</{tag}>The answer is 4.")
+    assert text == "The answer is 4."
+    assert thinking == "working it out"
+
+
+def test_unclosed_reasoning_is_not_shown_as_the_answer():
+    """A reply truncated inside its reasoning leaves an unclosed tag. Treating
+    the remainder as the answer publishes the model's working as a conclusion.
+    """
+    text, thinking = split_thinking("<think>I am still working through the")
+    assert text == ""
+    assert thinking.startswith("I am still working")
+
+
+def test_prompt_opens_thinking():
+    # Qwen3-style: template hands the model an already-open block, so the only
+    # tag it ever emits is the closing one.
+    assert prompt_opens_thinking("<|im_start|>assistant\n<think>\n") is True
+    assert prompt_opens_thinking("<|im_start|>assistant\n<think>\n\n</think>\n\n") is False
+    assert prompt_opens_thinking("<|im_start|>assistant\n") is False
+    # A think block belonging to an earlier turn must not count as open.
+    assert prompt_opens_thinking(
+        "<think>a</think>ans<|im_end|><|im_start|>assistant\n") is False
+
+
+# ── incremental streaming ─────────────────────────────────────────────────────
+
+def _drive(raw: str, chunk: int, in_think: bool = False) -> tuple[str, str]:
+    filt = StreamFilter(in_think=in_think)
+    events = []
+    for i in range(0, len(raw), chunk):
+        events += filt.feed(raw[i:i + chunk])
+    events += filt.close()
+    visible = "".join(t for c, t in events if c == "text")
+    thinking = "".join(t for c, t in events if c == "thinking")
+    return visible, thinking
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 7, 1000])
+def test_stream_never_leaks_markup(chunk):
+    """Whatever the delta boundaries, no markup reaches the visible channel.
+
+    Parameterised down to one character per delta because that is the case
+    that breaks naive buffering: a sentinel arrives split across deltas and a
+    filter that checks each delta in isolation emits half a tag.
+    """
+    raw = ('<think>plan the calculation</think>'
+           'Computing now.'
+           '<tool_call>{"name":"python_tool","arguments":{"code":"1+1"}}</tool_call>')
+    visible, thinking = _drive(raw, chunk)
+    assert visible.strip() == "Computing now."
+    assert thinking.strip() == "plan the calculation"
+    for marker in ("<think", "</think", "<tool_call", "</tool_call", '"name"'):
+        assert marker not in visible
+
+
+@pytest.mark.parametrize("chunk", [1, 5])
+def test_stream_with_preopened_think(chunk):
+    """The template opened the block, so only `</think>` is ever emitted."""
+    visible, thinking = _drive("Reasoning.</think>The answer is 14.07 mm.",
+                               chunk, in_think=True)
+    assert visible.strip() == "The answer is 14.07 mm."
+    assert thinking.strip() == "Reasoning."
+
+
+def test_stream_flushes_an_unclosed_tool_call():
+    """A reply cut off mid-call still shows the prose that preceded it."""
+    visible, _ = _drive('Working on it.<tool_call>{"name":"a"', 4)
+    assert visible.strip() == "Working on it."
+
+
+def test_stream_raw_is_complete():
+    """The filter must retain everything for the non-streaming parse."""
+    raw = '<think>a</think>b<tool_call>{"name":"c","arguments":{}}</tool_call>'
+    filt = StreamFilter()
+    for ch in raw:
+        filt.feed(ch)
+    filt.close()
+    assert filt.raw == raw
+
+
+# ── prompt rendering ──────────────────────────────────────────────────────────
+
+def test_chatml_fallback_preserves_tool_role():
+    """The two backends must render the same conversation identically.
+
+    They did not: one mapped role=tool onto a user turn and the other passed it
+    through, so a benchmark number depended on which backend had loaded.
+    """
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"function": {"name": "python_tool",
+                                      "arguments": {"code": "1"}}}]},
+        {"role": "tool", "content": "2"},
+    ]
+    rendered = render_chatml(messages, [], enable_thinking=True)
+    assert "<|im_start|>tool" in rendered
+    # The call the assistant made has to survive into the prompt, or the model
+    # sees a result it has no record of requesting.
+    assert "python_tool" in rendered
+
+
+def test_chatml_thinking_switch():
+    on = render_chatml([{"role": "user", "content": "q"}], [], enable_thinking=True)
+    off = render_chatml([{"role": "user", "content": "q"}], [], enable_thinking=False)
+    assert not on.rstrip().endswith("</think>")
+    assert off.rstrip().endswith("</think>")
+
+
+# ── session loop ──────────────────────────────────────────────────────────────
+
+class FakeBackend:
+    """Replays a fixed script of completions, so the loop can be tested without
+    a model. Records what it was asked, which is where the history bugs showed."""
+
+    context_limit = 4096
+    observed_tps = None
+
+    def __init__(self, script: list[Completion]) -> None:
+        self.script = list(script)
+        self.seen: list[list[dict]] = []
+        self.thinking_flags: list[bool] = []
+
+    def stream(self, messages, schemas, options):
+        self.seen.append([dict(m) for m in messages])
+        self.thinking_flags.append(bool(options.get("enable_thinking", True)))
+        completion = self.script.pop(0)
+        for word in (completion.text or "").split():
+            yield ("text", word + " ")
+        return completion
+
+    def generate(self, messages, schemas, options):
+        gen = self.stream(messages, schemas, options)
+        try:
+            while True:
+                next(gen)
+        except StopIteration as stop:
+            return stop.value
+
+    def count_tokens(self, text: str) -> int:
+        return max(len(text) // 4, 1)
+
+    def warm(self, *a, **k) -> None:
+        pass
+
+
+def _session(script, tmp_path):
+    from app.session import ChatSession
+    return ChatSession(FakeBackend(script), workspace=str(tmp_path))
+
+
+def test_assistant_message_keeps_its_tool_calls(tmp_path):
+    """Without this the model is shown a tool result it never asked for."""
+    script = [
+        Completion(text="", tool_calls=[ToolCall(name="list_files", args={}, id="c0")]),
+        Completion(text="Nothing there."),
+    ]
+    session = _session(script, tmp_path)
+    list(session.ask("what files?"))
+
+    assistant = next(m for m in session.history
+                     if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant["tool_calls"][0]["function"]["name"] == "list_files"
+
+
+def test_tool_result_is_persisted_and_linked(tmp_path):
+    """Tool output used to live only in the working transcript, so a follow-up
+    question arrived with no memory of what had been computed."""
+    script = [
+        Completion(text="", tool_calls=[ToolCall(name="list_files", args={}, id="c0")]),
+        Completion(text="Empty."),
+    ]
+    session = _session(script, tmp_path)
+    list(session.ask("what files?"))
+
+    tool_messages = [m for m in session.history if m["role"] == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == "c0"
+    assert tool_messages[0]["name"] == "list_files"
+
+
+def test_thinking_is_off_after_a_tool_result(tmp_path):
+    """Measured 1.7x on the shipped 4B: reasoning again before restating a
+    number a tool already computed is the loop's most expensive habit."""
+    script = [
+        Completion(text="", tool_calls=[ToolCall(name="list_files", args={}, id="c0")]),
+        Completion(text="Empty."),
+    ]
+    session = _session(script, tmp_path)
+    list(session.ask("what files?"))
+
+    assert session.backend.thinking_flags == [True, False]
+
+
+def test_streaming_events_reach_the_caller(tmp_path):
+    session = _session([Completion(text="hello there")], tmp_path)
+    kinds = [e["kind"] for e in session.ask("hi")]
+    assert "token" in kinds
+    assert kinds[-1] == "text" or "text" in kinds
+
+
+def test_long_tool_result_is_clipped(tmp_path):
+    from app.session import MAX_TOOL_RESULT_CHARS, _clip_tool_result
+    clipped = _clip_tool_result("x" * (MAX_TOOL_RESULT_CHARS * 2))
+    assert len(clipped) < MAX_TOOL_RESULT_CHARS + 200
+    # Both ends survive: a traceback ends with the exception, a page starts
+    # with the summary.
+    assert clipped.startswith("x")
+    assert clipped.endswith("x")
+
+
+def test_compaction_keeps_system_and_recent_turns(tmp_path):
+    session = _session([], tmp_path)
+    convo = [{"role": "system", "content": "SYSTEM RULES"}]
+    for i in range(10):
+        convo.append({"role": "user", "content": f"q{i}"})
+        convo.append({"role": "tool", "content": "z" * 4000})
+    convo.append({"role": "user", "content": "the current question"})
+
+    compacted, changed = session._compact(convo, budget=500)
+    assert changed
+    assert compacted[0]["content"] == "SYSTEM RULES"
+    assert compacted[-1]["content"] == "the current question"
+
+
+# ── file tools ────────────────────────────────────────────────────────────────
+
+def test_edit_file_refuses_an_ambiguous_match(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "x = 1\nx = 1\n")
+    result = session._edit_file("a.py", "x = 1", "x = 2")
+    assert "appears 2 times" in result
+    # Unchanged: a silent first-occurrence replacement is how a file ends up
+    # subtly wrong somewhere nobody looks.
+    assert session._read_file("a.py") == "x = 1\nx = 1\n"
+
+
+def test_edit_file_replaces_a_unique_match(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "alpha = 1\nbeta = 2\n")
+    assert "one replacement" in session._edit_file("a.py", "beta = 2", "beta = 3")
+    assert session._read_file("a.py") == "alpha = 1\nbeta = 3\n"
+
+
+def test_edit_file_reports_a_missing_anchor(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "alpha = 1\n")
+    assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
+
+
+def test_workspace_paths_cannot_escape(tmp_path):
+    session = _session([], tmp_path)
+    assert "escapes the workspace" in session._write_file("../../evil.txt", "x")

@@ -5,9 +5,22 @@ expected value here was computed in Python first, not taken from a textbook or
 from the model.
 
 Run it:
-    python scripts/bench_numeric.py                    # native tool loop (web/agent.py)
-    python scripts/bench_numeric.py --mode notools     # no tools, for comparison
-    python scripts/bench_numeric.py --model vasudha-v2
+    python scripts/bench_numeric.py                     # the shipping loop, via ollama
+    python scripts/bench_numeric.py --gguf model.gguf   # the shipping loop, built-in engine
+    python scripts/bench_numeric.py --mode notools      # no tools, for comparison
+    python scripts/bench_numeric.py --model qwen3:4b    # any model ollama is serving
+    python scripts/bench_numeric.py --legacy            # the old web/agent.py loop
+
+This drives app/session.py — the loop the desktop app actually runs. It used to
+drive web/agent.py, which the app stopped using; a gate pointed at code the
+product does not execute reports on a path nobody ships. `--legacy` still runs
+the old loop so the two can be compared directly rather than by memory.
+
+Because the backend is model-agnostic, `--model` and `--gguf` accept anything,
+which is what makes this usable as a comparison harness and not only a
+regression gate. Only python_tool is exposed regardless of what the app offers:
+letting the model search the web for a cantilever formula would measure
+something else entirely, and would not be comparable to the numbers below.
 
 Greedy decoding by default, so results are reproducible rather than a sample.
 
@@ -41,13 +54,13 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from web.agent import VasudhaAgent  # noqa: E402
 from web.tools import SandboxedCodeExecutor  # noqa: E402
 
 TESTS = [
@@ -98,24 +111,85 @@ def grade(text: str, answer: float, tol: float):
     return False, (values[-1] if values else None)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default=os.environ.get("VASUDHA_OLLAMA_MODEL", "vasudha-v3"))
-    parser.add_argument("--mode", choices=["tools", "notools"], default="tools")
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--out", default=None)
-    args = parser.parse_args()
+def _build_backend(args):
+    """An ollama or built-in backend, from the same selection the app uses."""
+    from app.backends import LlamaCppBackend, OllamaBackend
+
+    if args.gguf:
+        if not os.path.exists(args.gguf):
+            raise SystemExit(f"no such GGUF: {args.gguf}")
+        gpu = LlamaCppBackend.gpu_available()
+        print(f"  engine: built-in llama.cpp, gpu_offload={gpu}"
+              + ("" if gpu else "  <- CPU-only wheel, expect ~6 tok/s"))
+        return LlamaCppBackend(args.gguf, n_ctx=args.num_ctx,
+                               n_gpu_layers=-1 if gpu else 0)
+
+    served = OllamaBackend.probe()
+    if not served:
+        raise SystemExit(
+            "ollama is not running. Start it, or pass --gguf to use the built-in engine.")
+    match = next((n for n in served if args.model in n), None)
+    if match is None:
+        raise SystemExit(f"ollama is not serving {args.model!r}. Available: {served}")
+    print(f"  engine: ollama, model={match}")
+    return OllamaBackend(match)
+
+
+def _run_new_loop(args, options):
+    """Drive app/session.py — the loop the desktop app ships."""
+    from app.session import ChatSession
+
+    backend = _build_backend(args)
+    executor = SandboxedCodeExecutor(timeout=15)
+    workspace = tempfile.mkdtemp(prefix="vasudha_bench_")
+
+    for test in TESTS:
+        # A fresh session per problem, so one failure cannot contaminate the
+        # next through conversation history. The backend is reused: reloading
+        # a 2.3 GB GGUF six times would dominate the timings.
+        session = ChatSession(backend, system_prompt=SYSTEM, workspace=workspace)
+        session.max_iterations = 4
+
+        if args.mode == "notools":
+            session.schemas, session.tools = [], {}
+        else:
+            # python_tool only. The app also offers search, fetch, documents and
+            # file tools; leaving those exposed would let the model look up a
+            # formula instead of computing it, which is a different experiment
+            # and not comparable to the historical numbers in this docstring.
+            session.schemas = [s for s in session.schemas
+                               if s["function"]["name"] == "python_tool"]
+            session.tools = {"python_tool": lambda code="", **_:
+                             executor.execute_python(code)}
+
+        started = time.time()
+        first_token = None
+        final, calls, tokens = "", 0, 0
+
+        for event in session.ask(test["q"], dict(options)):
+            kind = event["kind"]
+            if kind == "token":
+                tokens += 1
+                if first_token is None:
+                    first_token = time.time() - started
+            elif kind == "text":
+                final = event["text"]
+            elif kind == "tool_call":
+                calls += 1
+            elif kind == "error":
+                final = f"[error] {event['text']}"
+
+        yield test, final, calls, time.time() - started, first_token, tokens
+
+
+def _run_legacy_loop(args, options):
+    """The pre-rewrite web/agent.py loop, kept so the two are comparable."""
+    from web.agent import VasudhaAgent
 
     executor = SandboxedCodeExecutor(timeout=15)
-    tools = {} if args.mode == "notools" else {"python_tool": lambda code: executor.execute_python(code)}
-
-    options = {"num_predict": 1024, "num_ctx": 8192, "temperature": args.temperature}
-    if args.temperature == 0:
-        options.update({"top_p": 1, "top_k": 1, "seed": 0})
-
-    correct = fired = 0
-    records = []
-    print(f"{'=' * 72}\n  {args.model}  mode={args.mode}  temp={args.temperature}\n{'=' * 72}")
+    tools = ({} if args.mode == "notools"
+             else {"python_tool": lambda code: executor.execute_python(code)})
+    print("  engine: ollama via web/agent.py (legacy loop)")
 
     for test in TESTS:
         agent = VasudhaAgent(model=args.model, tools=tools, system_prompt=SYSTEM,
@@ -129,20 +203,66 @@ def main() -> int:
                 calls += 1
             elif event.kind == "error":
                 final = f"[error] {event.text}"
+        yield test, final, calls, time.time() - started, None, 0
 
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default=os.environ.get("VASUDHA_OLLAMA_MODEL", "vasudha-v3"),
+                        help="Model name ollama is serving. Substring match.")
+    parser.add_argument("--gguf", default=None,
+                        help="Drive the built-in llama.cpp engine against this GGUF instead.")
+    parser.add_argument("--mode", choices=["tools", "notools"], default="tools")
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--num-ctx", type=int, default=8192)
+    parser.add_argument("--legacy", action="store_true",
+                        help="Run the old web/agent.py loop instead of the shipping one.")
+    parser.add_argument("--out", default=None)
+    args = parser.parse_args()
+
+    options = {"num_predict": 1024, "num_ctx": args.num_ctx,
+               "temperature": args.temperature}
+    if args.temperature == 0:
+        options.update({"top_p": 1, "top_k": 1, "seed": 0})
+
+    label = args.gguf or args.model
+    loop = "web/agent.py (legacy)" if args.legacy else "app/session.py (shipping)"
+    print(f"{'=' * 72}\n  {label}\n  loop={loop}  mode={args.mode}  "
+          f"temp={args.temperature}\n{'=' * 72}")
+
+    runner = _run_legacy_loop if args.legacy else _run_new_loop
+
+    correct = fired = 0
+    records = []
+    for test, final, calls, elapsed, ttft, tokens in runner(args, options):
         good, got = grade(final, test["answer"], test["tol"])
         correct += good
         fired += calls > 0
+        timing = f"{elapsed:.0f}s"
+        if ttft is not None:
+            timing += f" (first token {ttft:.1f}s)"
         print(f"  [{'PASS' if good else 'FAIL'}] {test['id']:<18} want={test['answer']:<9} "
-              f"got={got}  calls={calls}  {time.time() - started:.0f}s", flush=True)
+              f"got={got}  calls={calls}  {timing}", flush=True)
         records.append(dict(id=test["id"], ok=bool(good), want=test["answer"], got=got,
-                            calls=calls, final=final))
+                            calls=calls, seconds=round(elapsed, 1),
+                            ttft=round(ttft, 2) if ttft is not None else None,
+                            final=final))
 
     print(f"\n  --> {correct}/{len(TESTS)} correct, tool fired {fired}/{len(TESTS)}")
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
-            json.dump(records, handle, indent=2)
+            json.dump(dict(model=label, loop=loop, mode=args.mode,
+                           correct=correct, fired=fired, total=len(TESTS),
+                           results=records), handle, indent=2)
         print(f"wrote {args.out}")
+
+    # Non-zero exit when the tool path regresses, so this can gate a build.
+    # Correctness is not gated: it moves by one item between runs even at
+    # temperature 0, because llama.cpp is not bit-deterministic across model
+    # loads. Tool firing is the reproducible signal — it was 6/6 every run.
+    if args.mode == "tools" and fired < len(TESTS):
+        print(f"\n  FAIL: the tool path regressed — fired {fired}/{len(TESTS)}, expected all.")
+        return 1
     return 0
 
 

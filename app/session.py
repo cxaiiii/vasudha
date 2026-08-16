@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 12
 
+#: Fraction of the context window at which older tool output starts being
+#: summarised away. Not higher: the compaction pass itself has to fit, and so
+#: does the reply the model is about to write.
+COMPACT_AT = 0.70
+
+#: A tool result longer than this is truncated in the middle before it ever
+#: enters the transcript. A 40 KB page fetch is not more informative than its
+#: first and last few thousand characters, and it will evict the actual
+#: question from the window.
+MAX_TOOL_RESULT_CHARS = 6000
+
 #: The rules a persona must never be able to soften. personas.build_system_prompt
 #: appends this AFTER the voice guidance for exactly that reason.
 CORE_RULES = """Answer briefly and directly. Do not restate the question or pad the reply.
@@ -139,6 +150,74 @@ def default_schemas() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": (
+                    "Write a text file into the workspace. Use for source code, "
+                    "configs and data the user asked you to build — not for reports, "
+                    "which belong in document_tool. Overwrites an existing file."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string",
+                                 "description": "Path relative to the workspace, e.g. 'src/main.py'."},
+                        "content": {"type": "string", "description": "Full file contents."},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a text file back from the workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path relative to the workspace."},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List what is currently in the workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string",
+                                 "description": "Subdirectory to list. Omit for the whole workspace."},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": (
+                    "Replace an exact string in a workspace file. Prefer this over "
+                    "write_file when changing part of an existing file — rewriting a "
+                    "whole file to alter one line is how details get silently dropped. "
+                    "old_text must appear EXACTLY once."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path relative to the workspace."},
+                        "old_text": {"type": "string",
+                                     "description": "Exact text to replace, including indentation."},
+                        "new_text": {"type": "string", "description": "Replacement text."},
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                },
+            },
+        },
     ]
 
 
@@ -198,6 +277,7 @@ class ChatSession:
         self._searcher = WebSearcher(max_results=5)
         self._fetcher = PageFetcher(timeout=10, max_chars=4000)
         self._workspace = workspace
+        self._file_tools = None
         #: filled by document_tool so the UI can render the canvas
         self.last_document: Optional[dict] = None
         #: what this turn really consulted — the basis for provenance, since
@@ -209,6 +289,10 @@ class ChatSession:
             "search_tool": self._search_tool,
             "fetch_tool": self._fetch_tool,
             "document_tool": self._document_tool,
+            "write_file": self._write_file,
+            "read_file": self._read_file,
+            "list_files": self._list_files,
+            "edit_file": self._edit_file,
         }
         self.schemas = default_schemas()
         self.options: dict = {"temperature": 0.6, "top_p": 0.9,
@@ -241,6 +325,63 @@ class ChatSession:
         result = self._fetcher.fetch(url)
         self._fetches.append(url.strip())
         return result
+
+    # -- workspace files ---------------------------------------------------
+    # WorkspaceFileTools already resolves every path against the workspace root
+    # and rejects anything that escapes it, so the traversal check lives there
+    # rather than being re-implemented per tool here.
+
+    def _files(self):
+        """The file tool bound to this session's workspace, or None.
+
+        A session with no workspace (the one-shot benchmark path) gets a
+        temporary directory rather than an error: refusing to write a file is
+        a worse failure than writing it somewhere ephemeral.
+        """
+        from web.tools import WorkspaceFileTools
+        if self._file_tools is None:
+            root = (Path(self._workspace) if self._workspace
+                    else Path(tempfile.mkdtemp(prefix="vasudha_ws_")))
+            root.mkdir(parents=True, exist_ok=True)
+            self._workspace = self._workspace or str(root)
+            self._file_tools = WorkspaceFileTools(root)
+        return self._file_tools
+
+    def _write_file(self, path: str = "", content: str = "", **_: object) -> str:
+        return self._files().write_file(path, content)
+
+    def _read_file(self, path: str = "", **_: object) -> str:
+        return self._files().read_file(path)
+
+    def _list_files(self, path: str = ".", **_: object) -> str:
+        return self._files().list_directory(path or ".")
+
+    def _edit_file(self, path: str = "", old_text: str = "",
+                   new_text: str = "", **_: object) -> str:
+        """Exact-string replacement, refusing anything ambiguous.
+
+        A small model will happily pass an `old_text` that occurs three times
+        and expect the one it meant. Replacing the first occurrence silently is
+        how a file ends up subtly wrong in a place nobody looks; the count is
+        reported back instead so the model can widen its anchor.
+        """
+        files = self._files()
+        current = files.read_file(path)
+        if current.startswith("[Error"):
+            return current
+        if not old_text:
+            return "[error] edit_file needs old_text; use write_file to create a file"
+        occurrences = current.count(old_text)
+        if occurrences == 0:
+            return (f"[error] that exact text is not in {path}. Read the file first "
+                    "and copy the target text verbatim, including indentation.")
+        if occurrences > 1:
+            return (f"[error] that text appears {occurrences} times in {path}. "
+                    "Include more surrounding lines so it matches exactly once.")
+        result = files.write_file(path, current.replace(old_text, new_text))
+        if result.startswith("[Error"):
+            return result
+        return f"[edited {path}] one replacement made"
 
     # -- provenance --------------------------------------------------------
 
@@ -381,6 +522,89 @@ class ChatSession:
     def reset(self) -> None:
         self.history = []
 
+    # -- context budget ----------------------------------------------------
+
+    def _budget(self, options: dict) -> Optional[int]:
+        """How many tokens the transcript may occupy, or None if unknowable.
+
+        The backend's own limit wins when it has one: the built-in engine is
+        built with a fixed n_ctx and exceeding it is a hard failure, whereas
+        num_ctx in options is only a request. These disagreed before — the
+        setting said 16384 while the engine had been built at 8192 — and the
+        symptom was silent left-truncation rather than an error.
+        """
+        limit = getattr(self.backend, "context_limit", None) or options.get("num_ctx")
+        if not limit:
+            return None
+        # Leave room for the reply itself, or the budget is met exactly at the
+        # moment there is nowhere to put the answer.
+        return max(int(limit) - int(options.get("num_predict", 1024)) - 256, 1024)
+
+    def _measure(self, convo: list[dict]) -> int:
+        return sum(self.backend.count_tokens(str(m.get("content") or "")) + 8
+                   for m in convo)
+
+    def _compact(self, convo: list[dict], budget: int) -> tuple[list[dict], bool]:
+        """Shrink the transcript to fit, oldest evidence first.
+
+        Tool results are collapsed before anything else and the user's own
+        messages are never touched. That ordering is deliberate: a summarised
+        page fetch still supports the answer, whereas dropping the question
+        changes what is being answered. The system prompt and the last two
+        exchanges are always kept whole, because those are what the current
+        turn is actually reasoning about.
+        """
+        if self._measure(convo) <= budget:
+            return convo, False
+
+        keep_tail = 4
+        head, middle, tail = convo[:1], convo[1:-keep_tail], convo[-keep_tail:]
+        compacted = False
+
+        for message in middle:
+            if message.get("role") != "tool":
+                continue
+            body = str(message.get("content") or "")
+            if len(body) <= 400:
+                continue
+            message["content"] = (
+                body[:200].rstrip()
+                + f"\n[… {len(body) - 400} characters of earlier tool output "
+                  "dropped to stay inside the context window …]\n"
+                + body[-200:].lstrip())
+            compacted = True
+            if self._measure(head + middle + tail) <= budget:
+                return head + middle + tail, True
+
+        # Still over: drop whole exchanges from the front rather than letting
+        # the engine truncate from the left, which would silently amputate the
+        # system prompt and with it every rule in CORE_RULES.
+        while middle and self._measure(head + middle + tail) > budget:
+            middle.pop(0)
+            compacted = True
+
+        return head + middle + tail, compacted
+
+    # -- streaming ---------------------------------------------------------
+
+    def _stream_turn(self, convo: list[dict], options: dict) -> Iterator[dict]:
+        """Yield token events for one model call; return its Completion.
+
+        Used with `yield from`, so the completion falls out as the expression
+        value and app/session.py stays one generator from backend to UI.
+        """
+        stream = self.backend.stream(convo, self.schemas, options)
+        try:
+            while True:
+                channel, delta = next(stream)
+                if not delta:
+                    continue
+                yield {"kind": "token" if channel == "text" else "thinking_token",
+                       "text": delta}
+        except StopIteration as stop:
+            from app.backends import Completion
+            return stop.value or Completion()
+
     def ask(self, text: str, options: Optional[dict] = None) -> Iterator[dict]:
         # num_predict is deliberately roomy. At 1024 the model reliably ran out
         # of budget partway through a <tool_call>, and ollama's tool parser
@@ -395,12 +619,27 @@ class ChatSession:
         self.history.append({"role": "user", "content": text})
         convo = [{"role": "system", "content": self.system_prompt}] + list(self.history)
 
+        budget = self._budget(options)
         last_tool_result = ""
         nudged = False
+        used_tools = False
 
         for _ in range(self.max_iterations):
+            if budget:
+                convo, compacted = self._compact(convo, budget)
+                if compacted:
+                    yield {"kind": "status",
+                           "text": "Trimmed older tool output to stay in context."}
+
+            # Thinking is worth its cost when the model is deciding what to do,
+            # and not when it is restating a number a tool already computed.
+            # Measured on the shipped 4B: 10.05s with thinking vs 5.90s without,
+            # for the same post-tool answer — 1.7x, on every iteration.
+            step_options = dict(options)
+            step_options["enable_thinking"] = not used_tools
+
             try:
-                completion = self.backend.generate(convo, self.schemas, options)
+                completion = yield from self._stream_turn(convo, step_options)
             except BackendError as exc:
                 logger.warning("backend error: %s (%s)", exc, exc.detail)
                 yield {"kind": "error", "text": str(exc)}
@@ -437,13 +676,31 @@ class ChatSession:
                             yield {"kind": "document", **self._document_payload(title, body)}
                 return
 
-            convo.append({"role": "assistant", "content": completion.text or ""})
+            # The assistant message must carry the calls it made, not just its
+            # prose. Without them the next prompt shows the model a tool result
+            # with no record that it ever asked for one, and a model that is
+            # told it received an answer to a question it cannot see asking is
+            # being invited to hallucinate the question.
+            assistant_message = {
+                "role": "assistant",
+                "content": completion.text or "",
+                "tool_calls": [
+                    {"id": call.id, "type": "function",
+                     "function": {"name": call.name, "arguments": call.args}}
+                    for call in completion.tool_calls
+                ],
+            }
+            convo.append(assistant_message)
+            self.history.append(assistant_message)
+            used_tools = True
 
             for call in completion.tool_calls:
-                yield {"kind": "tool_call", "name": call.name, "args": call.args}
-                result = self._run_tool(call)
+                yield {"kind": "tool_call", "name": call.name,
+                       "args": call.args, "id": call.id}
+                result = _clip_tool_result(self._run_tool(call))
                 last_tool_result = result
-                yield {"kind": "tool_result", "name": call.name, "result": result}
+                yield {"kind": "tool_result", "name": call.name,
+                       "result": result, "id": call.id}
 
                 # The canvas gets the document itself, not the confirmation
                 # string the model sees — so a long report never has to travel
@@ -451,6 +708,29 @@ class ChatSession:
                 if call.name == "document_tool" and self.last_document:
                     yield {"kind": "document", **self.last_document}
 
-                convo.append({"role": "tool", "content": result})
+                # tool_call_id, and recorded in history rather than only in the
+                # working transcript. Tool results used to be dropped at the end
+                # of the turn, so a follow-up like "redo that with L=3" arrived
+                # with no memory of what had been computed.
+                tool_message = {"role": "tool", "tool_call_id": call.id,
+                                "name": call.name, "content": result}
+                convo.append(tool_message)
+                self.history.append(tool_message)
 
         yield {"kind": "status", "text": "Stopped after too many tool calls."}
+
+
+def _clip_tool_result(result: str) -> str:
+    """Bound one tool result before it enters the transcript.
+
+    Clipped in the middle, not the tail: a traceback puts the exception on the
+    last line and a fetched page puts the summary on the first, so keeping both
+    ends preserves whichever one mattered.
+    """
+    if len(result) <= MAX_TOOL_RESULT_CHARS:
+        return result
+    half = MAX_TOOL_RESULT_CHARS // 2
+    dropped = len(result) - MAX_TOOL_RESULT_CHARS
+    return (result[:half].rstrip()
+            + f"\n\n[… {dropped} characters clipped …]\n\n"
+            + result[-half:].lstrip())

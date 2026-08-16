@@ -80,6 +80,64 @@ function beginAssistant() {
   return bubble;
 }
 
+/* Streaming.
+
+   Tokens land in a plain-text element as they arrive, and the finished 'text'
+   event replaces that element with properly rendered markdown. Rendering
+   markdown on every delta instead would mean re-parsing a half-written code
+   fence sixty times a second, and a fence that is not closed yet renders as
+   garbage until the closing backticks show up. */
+let streamEl = null;
+let streamText = '';
+
+function streamDelta(text) {
+  if (!text) return;
+  if (!currentAssistant) beginAssistant();
+  if (!streamEl) {
+    streamEl = document.createElement('div');
+    streamEl.className = 'streaming';
+    currentAssistant.appendChild(streamEl);
+    streamText = '';
+  }
+  streamText += text;
+  streamEl.textContent = streamText;
+  scrollDown();
+}
+
+/* Hand the streamed run over to the rendered version. Returns true if it
+   consumed the text, so the caller does not append a second copy. */
+function finishStream(finalText) {
+  if (!streamEl) return false;
+  const el = streamEl;
+  streamEl = null;
+  const body = (finalText && finalText.trim()) ? finalText : streamText;
+  streamText = '';
+  if (!body.trim()) { el.remove(); return true; }
+  el.className = '';
+  el.innerHTML = renderMarkdown(body.trim());
+  scrollDown();
+  return true;
+}
+
+/* Reasoning arrives as deltas too, but goes into the collapsible card rather
+   than the reply body. Built on first delta so a model that never emits a
+   think block does not leave an empty card behind. */
+let thinkStreamBody = null;
+
+function thinkingDelta(text) {
+  if (!text) return;
+  if (!currentAssistant) beginAssistant();
+  if (!thinkStreamBody) {
+    addThinking('​');            // zero-width: builds the card structure
+    const cards = currentAssistant.querySelectorAll('.think-card');
+    const card = cards[cards.length - 1];
+    thinkStreamBody = card.querySelector('.think-body');
+    thinkStreamBody.textContent = '';
+  }
+  thinkStreamBody.textContent += text;
+  scrollDown();
+}
+
 function addStatus(label) {
   if (!currentAssistant) beginAssistant();
   const line = document.createElement('div');
@@ -158,11 +216,27 @@ let pendingStatus = null;
 window.vasudha = {
   onEvent(evt) {
     switch (evt.kind) {
+      case 'token':
+        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        streamDelta(evt.text);
+        break;
+
+      case 'thinking_token':
+        thinkingDelta(evt.text);
+        break;
+
       case 'thinking':
+        // Only build a card here if nothing was streamed into one already —
+        // backends that report reasoning as a separate field (ollama) send
+        // deltas, and this final event would otherwise duplicate the block.
+        if (thinkStreamBody) { thinkStreamBody = null; break; }
         addThinking(evt.text);
         break;
 
       case 'text':
+        // finishStream consumes the streamed run when there is one; only a
+        // non-streaming backend reaches the append path below.
+        if (finishStream(evt.text)) break;
         if (evt.text && evt.text.trim()) {
           if (!currentAssistant) beginAssistant();
           const p = document.createElement('div');
@@ -173,6 +247,10 @@ window.vasudha = {
         break;
 
       case 'tool_call':
+        // The prose before a tool call is finished text, not an abandoned
+        // stream: close it out before the card goes in, or the two interleave.
+        finishStream(null);
+        thinkStreamBody = null;
         if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
         pendingTool = addToolCard(evt.name, evt.args || {});
         break;
@@ -207,6 +285,8 @@ window.vasudha = {
         break;
 
       case 'error':
+        finishStream(null);
+        thinkStreamBody = null;
         if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
         if (!currentAssistant) beginAssistant();
         const err = document.createElement('div');
@@ -217,6 +297,8 @@ window.vasudha = {
         break;
 
       case 'done':
+        finishStream(null);       // a turn cut short still shows what arrived
+        thinkStreamBody = null;
         if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
         finishTurn();
         break;

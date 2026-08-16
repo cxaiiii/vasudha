@@ -37,6 +37,14 @@ class Settings:
     num_predict: int = 2048        # see session.py: 1024 truncated tool calls
     num_ctx: int = 16384
 
+    # -- engine tuning ----------------------------------------------------
+    # Defaults are the measured best on the shipped 4B Q4_K_M (see the table in
+    # app/backends.py). n_threads=0 means "detect physical cores" — the right
+    # answer varies per machine and hyperthreads measurably hurt, so this is
+    # derived rather than guessed at a fixed number.
+    n_batch: int = 1024
+    n_threads: int = 0
+
     # -- identity --------------------------------------------------------
     persona: str = "engineer"
     #: False until the first-run picker has been completed once
@@ -64,6 +72,9 @@ class Settings:
         self.num_ctx = min(max(int(self.num_ctx), 2048), 262144)
         self.tool_timeout = min(max(int(self.tool_timeout), 1), 120)
         self.max_iterations = min(max(int(self.max_iterations), 1), 32)
+        self.n_batch = min(max(int(self.n_batch), 32), 4096)
+        # 0 stays 0: it is the sentinel for "detect", not a value to clamp up.
+        self.n_threads = max(int(self.n_threads), 0)
         if self.backend not in ("auto", "ollama", "builtin"):
             self.backend = "auto"
         return self
