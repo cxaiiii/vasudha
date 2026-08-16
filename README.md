@@ -130,13 +130,29 @@ are genuinely useful and genuinely experimental, in that order.
 
 ## Architecture
 
-The shipped model is Qwen3.5-4B fine-tuned for this app's tool format. Qwen3.5
-is itself a hybrid: 24 of its 32 layers use linear attention and every fourth is
-full attention, which is where the long-context behaviour comes from. That is
-Qwen's design, not this project's — worth stating plainly, because the repo also
-contains an independent hybrid implementation under `vasudha/` that has never
-been part of a released model. There is no MoE in the shipped weights. See
-[docs/architecture.md](docs/architecture.md) for the research branch.
+Vasudha runs Qwen3.5-4B, fine-tuned for this app's tool format. It is a hybrid
+model — 24 of its 32 layers use linear attention, every fourth is full
+attention — which is what keeps long context affordable on a laptop. That layer
+design is Qwen's, and it is the reason this base was chosen over a dense one.
+
+The engineering here is the layer above the weights, and it is where the
+measurable difference is:
+
+- **A tool loop that isn't tied to one model.** Prompts render from whatever
+  chat template the GGUF carries, and tool calls are parsed from any of the
+  formats models actually emit. Drop in a different GGUF and measure it with
+  `scripts/compare_models.py`.
+- **A real Python sandbox on the numeric path.** Asked politely to use a
+  calculator: 0/6 correct, tool fired 1/6. Given a real tool interface: 4/6 and
+  6/6. That gap is the product.
+- **Provenance enforced by the harness, not requested of the model.** Citations
+  the model did not earn are removed before you see them.
+- **GPU by default.** 7x decode and 48x prefill over CPU, with the numeric gate
+  passing unchanged — `scripts/check_engine.py` re-checks both in a minute.
+
+`vasudha/` holds an independent hybrid-attention and MoE implementation from an
+earlier line of work. It is research, it has never shipped in a released model,
+and [docs/architecture.md](docs/architecture.md) describes it.
 
 The desktop app is a pywebview shell over a WebView2 window: no bundled browser,
 no HTTP server, no open port. The UI talks to Python over an in-process bridge,
