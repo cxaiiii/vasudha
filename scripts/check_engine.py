@@ -75,10 +75,20 @@ def main() -> int:
     prefill_tps = None
     if hasattr(backend, "count_tokens") and args.gguf:
         filler = ("You are a careful engineering assistant. " * 200)
-        n = backend.count_tokens(filler)
-        t = time.time()
+        tokens = backend._llm.tokenize(filler.encode(), special=True)
+        n = len(tokens)
+
+        # Discard the first pass. Vulkan compiles its compute pipelines on
+        # first use, and that one-time cost lands entirely inside whichever
+        # eval happens to run first — it reported 60.8 tok/s prefill on a GPU
+        # that was doing better than 700, which reads as "the GPU did not help
+        # prefill" when in fact the shader cache was cold.
         backend._llm.reset()
-        backend._llm.eval(backend._llm.tokenize(filler.encode(), special=True))
+        backend._llm.eval(tokens[:64])
+
+        backend._llm.reset()
+        t = time.time()
+        backend._llm.eval(tokens)
         dt = time.time() - t
         prefill_tps = n / dt
         print(f"  prefill           {prefill_tps:7.1f} tok/s"

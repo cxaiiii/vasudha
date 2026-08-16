@@ -299,6 +299,16 @@ class ChatSession:
                               "num_predict": 2048, "num_ctx": 16384}
         self.max_iterations = MAX_ITERATIONS
 
+    def set_workspace(self, path: str) -> None:
+        """Point the file tools at a different directory.
+
+        Resets the cached WorkspaceFileTools rather than mutating it, so a call
+        already running keeps writing where it started instead of having the
+        root swapped underneath it mid-write.
+        """
+        self._workspace = path
+        self._file_tools = None
+
     def set_tool_timeout(self, seconds: int) -> None:
         """Rebuild the executor rather than mutating it: a run already in
         flight keeps the timeout it started with."""

@@ -132,6 +132,12 @@ class Api:
         if model_path is None:
             model_path = self._store.installed_model()
 
+        # Before select_backend, which is the first thing to import llama_cpp:
+        # the ggml backends register at library load and a device filtered
+        # afterwards is already initialised.
+        from app.backends import set_gpu_device
+        set_gpu_device(self._settings.gpu_device)
+
         prefer = None if self._settings.backend == "auto" else self._settings.backend
         if not model_path and not OllamaBackend.probe(self._settings.ollama_url):
             self._needs_setup = True
@@ -157,10 +163,35 @@ class Api:
 
         self._session = ChatSession(
             self._backend,
-            system_prompt=personas.build_system_prompt(self._settings.persona, CORE_RULES))
+            system_prompt=personas.build_system_prompt(self._settings.persona, CORE_RULES),
+            workspace=str(self._workspace_for(self._chat.id)))
         self._apply_settings()
         self._needs_setup = False
         threading.Thread(target=self._warm, daemon=True).start()
+
+    @staticmethod
+    def _workspace_for(chat_id: str) -> Path:
+        """One durable directory per chat, under the app's data folder.
+
+        The session used to be built with no workspace at all, which sent every
+        file the model wrote — and every document it produced — to a temporary
+        directory the OS is free to delete. That was survivable when documents
+        were the only output; with read_file/write_file/edit_file it means a
+        project the model builds across several turns can vanish underneath it,
+        and the user has nowhere to look for the files afterwards.
+
+        Keyed by chat id so two conversations cannot overwrite each other's
+        files, and so reopening a chat finds the work it produced.
+        """
+        path = app_data_dir() / "workspaces" / (chat_id or "default")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _rebind_workspace(self) -> None:
+        """Point the live session at the current chat's workspace."""
+        if not self._session:
+            return
+        self._session.set_workspace(str(self._workspace_for(self._chat.id)))
 
     def _warm(self) -> None:
         """Prefill the static prompt prefix while the user is still reading the
@@ -458,6 +489,7 @@ class Api:
         self._chat = Chat()
         if self._session:
             self._session.reset()
+        self._rebind_workspace()
         self._call_js("loadChat", {"events": []})
         self._push_chat_list()
 
@@ -468,8 +500,15 @@ class Api:
         self._chat = chat
         if self._session:
             self._session.history = list(chat.messages)
+        # Follow the chat: reopening a conversation should find the files it
+        # created, not the previous chat's.
+        self._rebind_workspace()
         self._call_js("loadChat", {"events": chat.events})
         self._push_chat_list()
+
+    def open_workspace_folder(self) -> None:
+        """Show the user where the model's files actually are."""
+        self._open_folder(self._workspace_for(self._chat.id))
 
 
 #: Minimum time the splash stays up. Boot is often faster than this, but a

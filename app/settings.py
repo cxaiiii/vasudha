@@ -44,6 +44,11 @@ class Settings:
     # derived rather than guessed at a fixed number.
     n_batch: int = 1024
     n_threads: int = 0
+    # Which GPU to use, when the machine has more than one. -1 = let llama.cpp
+    # choose, which takes device 0 — the integrated GPU on a switchable-graphics
+    # laptop. Set to the discrete card's index (usually 1) to use it instead;
+    # the device list is printed at startup when VASUDHA_DEBUG is set.
+    gpu_device: int = -1
 
     # -- identity --------------------------------------------------------
     persona: str = "engineer"
@@ -75,6 +80,8 @@ class Settings:
         self.n_batch = min(max(int(self.n_batch), 32), 4096)
         # 0 stays 0: it is the sentinel for "detect", not a value to clamp up.
         self.n_threads = max(int(self.n_threads), 0)
+        # -1 is the "leave it alone" sentinel; anything below that is a typo.
+        self.gpu_device = max(int(self.gpu_device), -1)
         if self.backend not in ("auto", "ollama", "builtin"):
             self.backend = "auto"
         return self

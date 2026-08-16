@@ -873,6 +873,37 @@ class LlamaCppBackend(Backend):
         self._llm = None
 
 
+def set_gpu_device(index: int) -> None:
+    """Restrict llama.cpp to one GPU, before its shared library loads.
+
+    A laptop with switchable graphics presents two Vulkan devices and llama.cpp
+    takes device 0, which on this class of machine is the *integrated* GPU:
+
+        0 = AMD Radeon 740M Graphics   uma: 1
+        1 = NVIDIA GeForce RTX 4050    uma: 0
+
+    Device 0 is the wrong one and nothing says so — it is fast enough (46.7
+    tok/s measured, 6.7x CPU) to look like the discrete card is working. The
+    integrated part shares system RAM, so it is also bandwidth-starved exactly
+    where decode is bandwidth-bound.
+
+    Filtering by environment variable rather than by main_gpu because it has to
+    happen before the ggml backends register at library load; main_gpu is read
+    afterwards and cannot un-choose a device that is already initialised. The
+    variables filter and reindex like CUDA_VISIBLE_DEVICES, so the survivor
+    becomes device 0 and main_gpu stays at its default.
+
+    index < 0 leaves everything alone, which is the default: guessing wrong
+    here means no GPU at all rather than a slower one.
+    """
+    if index < 0:
+        return
+    for name in ("GGML_VK_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
+                 "HIP_VISIBLE_DEVICES"):
+        os.environ.setdefault(name, str(index))
+    logger.info("restricted GPU selection to device %d", index)
+
+
 def _physical_cores() -> int:
     """Physical cores, falling back to half the logical count.
 
