@@ -379,7 +379,50 @@ body.reduce-motion .streaming::after { content: none; }
   border-radius: var(--radius-pill);
 }
 .tool-head:hover { color: var(--ink); }
-.tool-head .chev { margin-left: auto; transition: transform 160ms cubic-bezier(0.22, 0.8, 0.3, 1); }
+
+/* Status dot. A tool call now spans a real wait — browsing blocks on a page
+   load — so the card has to say whether it is still going, not only what it
+   eventually produced. */
+.tool-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tan);
+  transition: background 200ms ease;
+}
+.tool-card.running .tool-dot {
+  background: var(--saffron);
+  animation: tool-pulse 1.25s ease-in-out infinite;
+}
+.tool-card.done .tool-dot   { background: var(--forest); }
+.tool-card.failed .tool-dot { background: #B4341C; }
+@keyframes tool-pulse { 50% { opacity: 0.28; } }
+
+/* A failed call is worth noticing without opening anything. */
+.tool-card.failed { border-color: rgba(180, 52, 28, 0.45); }
+.tool-card.failed .tool-out { border-left-color: #B4341C; }
+
+.tool-head .tool-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Elapsed seconds, in the quietest possible register: it is reassurance that
+   something is happening, not a number anyone should be reading closely. */
+.tool-elapsed {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint, var(--ink-soft));
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+.status-line .tool-elapsed { margin-left: 8px; }
+
+.tool-head .chev { margin-left: 8px; transition: transform 160ms cubic-bezier(0.22, 0.8, 0.3, 1); }
 .tool-card.open .chev { transform: rotate(90deg); }
 .tool-body { display: none; padding: 0 13px 12px; }
 .tool-card.open .tool-body { display: block; animation: fade-in 160ms ease both; }

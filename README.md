@@ -48,9 +48,18 @@ decoding. Reproduce it yourself with `python scripts/bench_numeric.py`.
 RC cutoff frequencies, heat transfer. Every result comes with the code that
 produced it, expanded by default — the computation *is* the justification.
 
-**Searches the web, and tells you what it actually read.** Search queries are the
-only thing that ever leaves your machine, and the interface says so at the moment
-it happens.
+**Searches the web, and tells you what it actually read.** Nothing leaves your
+machine unless you ask a question that needs the web — and when that happens the
+interface says so at the moment it happens, naming the query that left and every
+page that was opened.
+
+**Reads pages properly, when it has to.** Optionally, the model can drive a real
+browser: it waits for the page's JavaScript to run, reads the resulting
+structure, and can click through and fill in fields. That is what makes
+documentation sites and anything interactive readable at all — a plain fetch
+returns an empty shell for most of the modern web. Off unless you install it
+(`pip install playwright && playwright install chromium`), because it needs a
+browser of its own and the point of the default build is that it doesn't.
 
 **Builds documents.** Reports, comparisons and spreadsheets render in a preview
 canvas beside the chat, with export. Markdown, CSV and HTML.
@@ -121,9 +130,13 @@ are genuinely useful and genuinely experimental, in that order.
 
 ## Architecture
 
-Qwen3-4B converted to a hybrid — most layers Gated Linear Attention (O(1) memory
-in context length), a minority kept as full attention, with MoE upcycling. See
-[docs/architecture.md](docs/architecture.md).
+The shipped model is Qwen3.5-4B fine-tuned for this app's tool format. Qwen3.5
+is itself a hybrid: 24 of its 32 layers use linear attention and every fourth is
+full attention, which is where the long-context behaviour comes from. That is
+Qwen's design, not this project's — worth stating plainly, because the repo also
+contains an independent hybrid implementation under `vasudha/` that has never
+been part of a released model. There is no MoE in the shipped weights. See
+[docs/architecture.md](docs/architecture.md) for the research branch.
 
 The desktop app is a pywebview shell over a WebView2 window: no bundled browser,
 no HTTP server, no open port. The UI talks to Python over an in-process bridge,
@@ -137,11 +150,19 @@ app/
 ├── personas.py     personality presets, loaded from editable JSON
 ├── bootstrap.py    first-run model download, resumable + verified
 └── ui/             the interface
+web/
+└── browser.py      optional: a real browser the model can drive
 scripts/
 ├── bench_numeric.py      the accuracy gate
+├── check_engine.py       is the engine fast, and is it still right
+├── compare_models.py     run the gate over several models, one table
 ├── publish_model.py      upload weights, wire the download link
 └── simulate_first_run.py wipe local state, see what a new user sees
 ```
+
+Any GGUF works, not just this one: prompts render from the model's own chat
+template and tool calls are parsed from whichever format it emits, so a
+different model can be dropped in and measured with `compare_models.py`.
 
 ## Verifying it yourself
 

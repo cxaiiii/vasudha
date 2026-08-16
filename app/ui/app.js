@@ -142,10 +142,24 @@ function addStatus(label) {
   if (!currentAssistant) beginAssistant();
   const line = document.createElement('div');
   line.className = 'status-line';
-  line.innerHTML = `<span class="spinner"></span><span>${escapeHtml(label)}</span>`;
+  line.innerHTML = `<span class="spinner"></span><span>${escapeHtml(label)}</span>` +
+                   `<span class="tool-elapsed" data-elapsed></span>`;
   currentAssistant.appendChild(line);
+  // A status line is removed rather than settled, so its timer is cleared by
+  // removeStatus — a detached node with a live interval keeps ticking for the
+  // life of the page.
+  startElapsed(line.querySelector('[data-elapsed]'));
   scrollDown();
   return line;
+}
+
+/* Every path that drops a status line goes through here, so no timer is
+   orphaned on a node that has left the document. */
+function removeStatus() {
+  if (!pendingStatus) return;
+  stopElapsed(pendingStatus.querySelector('[data-elapsed]'));
+  pendingStatus.remove();
+  pendingStatus = null;
 }
 
 function addThinking(text) {
@@ -167,33 +181,58 @@ function addThinking(text) {
 }
 
 /* A tool call is evidence, so it gets a real card: the exact code that ran and
-   the exact stdout it produced, both inspectable. Open by default for
-   python_tool — the computation IS the answer's justification. */
+   the exact stdout it produced, both inspectable.
+
+   Which tools are evidence rather than plumbing.
+
+   python_tool stays expanded because the computation IS the justification for
+   the number — that is the whole argument of this project. The others became
+   noise once there were nine tools: a file listing does not need to be open by
+   default the way a calculation does. */
+const EVIDENCE_TOOLS = ['python_tool'];
+
+const TOOL_LABELS = {
+  python_tool: 'ran Python',
+  // Named explicitly: these are what send something off the machine, so the
+  // user should see exactly what left it.
+  search_tool: 'searched the web (query sent to DuckDuckGo)',
+  fetch_tool: 'downloaded and read a page',
+  browse_tool: 'opened a page in a browser',
+  document_tool: 'built a document',
+  render_tool: 'rendered a preview',
+  write_file: 'wrote a file',
+  read_file: 'read a file',
+  edit_file: 'edited a file',
+  list_files: 'listed the workspace',
+};
+
+/* What the model asked for, in one line. browse_tool is the awkward one: its
+   meaningful argument depends on the action, and showing "open" alone tells
+   nobody anything. */
+function toolPayload(name, args) {
+  if (name === 'browse_tool') {
+    const what = args.url || args.ref || '';
+    return [args.action || 'open', what, args.text ? `"${args.text}"` : '']
+      .filter(Boolean).join('  ');
+  }
+  return args.code || args.query || args.url || args.title || args.path || '';
+}
+
 function addToolCard(name, args) {
   if (!currentAssistant) beginAssistant();
   const card = document.createElement('div');
-  const evidenceTools = ['python_tool', 'search_tool', 'fetch_tool'];
-  const expand = settings.open_tool_cards !== false && evidenceTools.includes(name);
-  card.className = 'tool-card' + (expand ? ' open' : '');
+  const expand = settings.open_tool_cards !== false && EVIDENCE_TOOLS.includes(name);
+  card.className = 'tool-card running' + (expand ? ' open' : '');
 
-  const payload = args.code || args.query || args.url || args.title || args.path || '';
-  const label = {
-    python_tool: 'ran Python',
-    // Named explicitly: this is the only tool that sends anything off the
-    // machine, so the user should see the exact query that left it.
-    search_tool: 'searched the web (query sent to DuckDuckGo)',
-    fetch_tool: 'downloaded and read a page',
-    document_tool: 'built a document',
-    render_tool: 'rendered a preview',
-    write_file: 'wrote a file',
-    read_file: 'read a file',
-    list_directory: 'listed the workspace',
-  }[name] || name;
+  const payload = toolPayload(name, args);
+  const label = TOOL_LABELS[name] || name;
 
   card.innerHTML =
     `<div class="tool-head">
+       <span class="tool-dot" aria-hidden="true"></span>
        <span class="tag">${escapeHtml(name)}</span>
-       <span>${escapeHtml(label)}</span>
+       <span class="tool-label">${escapeHtml(label)}</span>
+       <span class="tool-elapsed" data-elapsed></span>
        <span class="chev">&#9656;</span>
      </div>
      <div class="tool-body">
@@ -204,8 +243,46 @@ function addToolCard(name, args) {
   card.querySelector('.tool-head').addEventListener('click',
     () => card.classList.toggle('open'));
   currentAssistant.appendChild(card);
+  startElapsed(card.querySelector('[data-elapsed]'));
   scrollDown();
   return card;
+}
+
+/* A counting seconds display, on anything that can run long.
+
+   Browsing waits on a real page load and a research turn can run a minute. A
+   spinner that never changes is indistinguishable from a hang, and the honest
+   fix is to show that something is still happening rather than to guess at a
+   percentage nobody can compute. */
+function startElapsed(el) {
+  if (!el) return;
+  const started = Date.now();
+  const tick = () => {
+    const s = (Date.now() - started) / 1000;
+    el.textContent = s < 1 ? '' : (s < 60 ? `${s.toFixed(0)}s`
+                                          : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`);
+  };
+  tick();
+  el._timer = setInterval(tick, 500);
+}
+
+function stopElapsed(el) {
+  if (el && el._timer) { clearInterval(el._timer); el._timer = null; }
+}
+
+/* Settle a tool card. A result beginning with [error] is a failure the model
+   will now try to recover from, and showing it as a success would misrepresent
+   what the transcript actually says happened. */
+function finishToolCard(card, result) {
+  if (!card) return;
+  const text = (result || '').trim();
+  const failed = text.startsWith('[error]') || text.startsWith('[Error');
+  card.classList.remove('running');
+  card.classList.add(failed ? 'failed' : 'done');
+  stopElapsed(card.querySelector('[data-elapsed]'));
+  const out = card.querySelector('[data-out]');
+  if (out) out.textContent = text || '(no output)';
+  if (failed) card.classList.add('open');   // a failure is worth seeing unasked
 }
 
 /* ── event bus from Python ───────────────────────────────────────────── */
@@ -217,7 +294,7 @@ window.vasudha = {
   onEvent(evt) {
     switch (evt.kind) {
       case 'token':
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        removeStatus();
         streamDelta(evt.text);
         break;
 
@@ -251,16 +328,13 @@ window.vasudha = {
         // stream: close it out before the card goes in, or the two interleave.
         finishStream(null);
         thinkStreamBody = null;
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        removeStatus();
         pendingTool = addToolCard(evt.name, evt.args || {});
         break;
 
       case 'tool_result': {
-        if (pendingTool) {
-          const out = pendingTool.querySelector('[data-out]');
-          if (out) out.textContent = (evt.result || '').trim() || '(no output)';
-          pendingTool = null;
-        }
+        finishToolCard(pendingTool, evt.result);
+        pendingTool = null;
         pendingStatus = addStatus('Reading the result…');
         break;
       }
@@ -280,14 +354,14 @@ window.vasudha = {
         break;
 
       case 'status':
-        if (pendingStatus) pendingStatus.remove();
+        removeStatus();
         pendingStatus = addStatus(evt.text);
         break;
 
       case 'error':
         finishStream(null);
         thinkStreamBody = null;
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        removeStatus();
         if (!currentAssistant) beginAssistant();
         const err = document.createElement('div');
         err.className = 'tool-out';
@@ -299,7 +373,7 @@ window.vasudha = {
       case 'done':
         finishStream(null);       // a turn cut short still shows what arrived
         thinkStreamBody = null;
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        removeStatus();
         finishTurn();
         break;
     }
@@ -409,7 +483,7 @@ window.vasudha = {
       }
     });
 
-    if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+    removeStatus();
     finishTurn();
     scrollDown(true);
   },
