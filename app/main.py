@@ -52,8 +52,30 @@ from app import personas  # noqa: E402
 from app.session import ChatSession, CORE_RULES  # noqa: E402
 from app.settings import Settings, SettingsStore  # noqa: E402
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+def _configure_logging() -> None:
+    """Log to a file as well as the console.
+
+    A windowed build has console=False, so sys.stderr goes nowhere and every
+    traceback the app produces is lost. That is how a model failing to load
+    turned into "the app shows the download screen" with no way to find out
+    why. The file is small, capped, and the first thing to ask a user for.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        from logging.handlers import RotatingFileHandler
+        from app.paths import app_data_dir
+        handlers.append(RotatingFileHandler(
+            app_data_dir() / "vasudha.log", maxBytes=512_000, backupCount=1,
+            encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - an unwritable data dir must not stop launch
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers)
+
+
+_configure_logging()
 logger = logging.getLogger("vasudha.app")
 
 def _find_ui_dir() -> Path:
@@ -97,6 +119,11 @@ class Api:
         self._session: Optional[ChatSession] = None
         self._maximised = False
         self._needs_setup = False
+        #: Why the engine would not start, when a model was present but unusable.
+        #: Empty means "no model yet", which is the only case the download
+        #: screen actually answers.
+        self._load_error = ""
+        self._failed_model = ""
         self._lock = threading.Lock()
 
     # -- plumbing ----------------------------------------------------------
@@ -157,9 +184,25 @@ class Api:
                 n_ctx=self._settings.num_ctx,
                 n_batch=self._settings.n_batch,
                 n_threads=self._settings.n_threads)
-        except RuntimeError:
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Every failure to build an engine used to land the user on the
+            # download screen, whatever the cause: `except RuntimeError` caught
+            # a model that would not load, and anything else (an ImportError
+            # from a missing native library, a VRAM allocation that failed)
+            # escaped prepare() entirely and left self._backend as None, which
+            # _publish reads as "no model" too.
+            #
+            # So a machine with a perfectly good 2.3 GB GGUF already on disk was
+            # told to download 2.3 GB, and downloading again could not possibly
+            # fix it. Record what actually went wrong instead; _publish decides
+            # what to show, and it now has something true to show.
+            logger.exception("could not start an engine")
             self._needs_setup = True
+            self._load_error = f"{type(exc).__name__}: {exc}"
+            self._failed_model = str(model_path) if model_path else ""
             return
+        self._load_error = ""
+        self._failed_model = ""
 
         self._session = ChatSession(
             self._backend,
@@ -232,7 +275,14 @@ class Api:
         self._call_js("setDataPath", str(app_data_dir()))
 
         if self._needs_setup or not self._backend:
-            self._call_js("showFirstRun", True)
+            # Two genuinely different situations, which looked identical before:
+            # there is no model, or there is one and it will not load. Only the
+            # first is fixed by downloading, so only the first gets a download
+            # screen that promises it will help.
+            self._call_js("showFirstRun", {
+                "error": self._load_error,
+                "model": self._failed_model,
+            })
             return
 
         # Persona choice comes after the engine is up: it is a preference, and
@@ -416,7 +466,19 @@ class Api:
             file_types=("GGUF model (*.gguf)", "All files (*.*)"))
         if not chosen:
             return ""
-        path = Path(chosen[0])
+        # create_file_dialog returns a tuple of paths on most pywebview
+        # backends and a bare string on some. Indexing [0] unconditionally
+        # takes the first *character* of the string form — "C" — which becomes
+        # a path that does not exist, gets written to settings and to
+        # models.json, and sends the app straight back to this screen having
+        # apparently ignored the file the user just picked. save_document
+        # already guards this; this one did not.
+        path = Path(chosen if isinstance(chosen, str) else chosen[0])
+        if not path.is_file():
+            self._call_js("onDownloadError",
+                          {"message": f"That is not a readable file: {path}"})
+            return ""
+
         self._store.adopt(path)
         self._settings.model_path = str(path)
         self._settings_store.save(self._settings)

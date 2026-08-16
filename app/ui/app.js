@@ -421,8 +421,42 @@ window.vasudha = {
     $('#dl-detail').textContent = parts.join('   ·   ');
   },
 
+  /* `show` is falsey to hide, or {error, model} describing why there is no
+     engine. An engine that failed to load is not a missing download, and
+     offering "Download model" as the fix for it sends the user to fetch 2.3 GB
+     they already have. */
   showFirstRun(show) {
-    $('#firstrun').classList.toggle('show', !!show);
+    const panel = $('#firstrun');
+    panel.classList.toggle('show', !!show);
+    if (!show) return;
+
+    const err = (typeof show === 'object' && show.error) ? show.error : '';
+    const model = (typeof show === 'object' && show.model) ? show.model : '';
+    const box = $('#dl-error');
+
+    if (err) {
+      $('#fr-title').textContent = 'Vasudha could not start its engine';
+      $('#fr-body').textContent = model
+        ? 'The model file is here, so downloading it again will not help. ' +
+          'The engine refused to load it:'
+        : 'The engine could not be started:';
+      box.innerHTML = `<b>${escapeHtml(err)}</b>` +
+        (model ? `\n\n${escapeHtml(model)}` : '') +
+        '\n\nTry a different model file, or lower the context size in Settings ' +
+        'if this machine is short on memory.';
+      box.classList.add('show');
+      // Relabelled, because the primary action is no longer the useful one.
+      $('#dl-start').textContent = 'Download a fresh copy anyway';
+      $('#dl-locate').textContent = 'Choose a different file';
+    } else {
+      $('#fr-title').textContent = 'Set up Vasudha';
+      $('#fr-body').textContent =
+        'Vasudha needs its model file once. It is about 2.3 GB and is stored on ' +
+        'this machine — after this, the app works with no internet at all.';
+      box.classList.remove('show');
+      $('#dl-start').textContent = 'Download model';
+      $('#dl-locate').textContent = 'I already have the file';
+    }
   },
 
   onDownloadError(payload) {
