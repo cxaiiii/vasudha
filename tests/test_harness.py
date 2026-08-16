@@ -346,6 +346,108 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── memory book ───────────────────────────────────────────────────────────────
+
+def test_a_lesson_survives_a_restart(tmp_path):
+    from app.memory import MemoryBook
+    MemoryBook(tmp_path).remember("sandbox packages",
+                                  "textblob is not installed; pip_tool first.")
+    assert "textblob is not installed" in MemoryBook(tmp_path).as_prompt_section()
+
+
+def test_rewriting_a_topic_replaces_it(tmp_path):
+    """The whole point: a better answer overwrites a worse one rather than
+    accumulating beside it, so the book does not fill with contradictions."""
+    from app.memory import MemoryBook
+    book = MemoryBook(tmp_path)
+    book.remember("sentiment", "hand-roll a word list")
+    result = book.remember("sentiment", "use textblob after pip_tool",
+                           source="https://textblob.readthedocs.io")
+
+    assert "revision 2" in result
+    assert len(book) == 1
+    section = book.as_prompt_section()
+    assert "textblob" in section
+    assert "hand-roll" not in section
+    # ...but the superseded version survives in the history, which is the part
+    # that becomes training data.
+    history = (tmp_path / "lessons.jsonl").read_text(encoding="utf-8")
+    assert "hand-roll" in history
+
+
+@pytest.mark.parametrize("a,b", [
+    ("Sandbox Packages", "sandbox packages"),
+    ("sandbox-packages", "sandbox packages!"),
+])
+def test_topic_keys_are_normalised(tmp_path, a, b):
+    """Two spellings of one topic must not become two lessons."""
+    from app.memory import MemoryBook
+    book = MemoryBook(tmp_path)
+    book.remember(a, "first")
+    book.remember(b, "second")
+    assert len(book) == 1
+
+
+def test_book_is_truncated_at_a_whole_lesson(tmp_path):
+    """Half a lesson is worse than none — the model acts on the half it sees."""
+    from app.memory import MemoryBook
+    book = MemoryBook(tmp_path)
+    for i in range(60):
+        book.remember(f"topic {i}", "x" * 200)
+    section = book.as_prompt_section(budget=500)
+    assert len(section) < 900
+    assert not section.rstrip().endswith("x" * 50 + "…")
+
+
+def test_empty_book_adds_nothing_to_the_prompt(tmp_path):
+    from app.memory import MemoryBook
+    assert MemoryBook(tmp_path).as_prompt_section() == ""
+
+
+def test_interaction_log_keeps_the_users_own_words(tmp_path):
+    """Verbatim on purpose: phrasing and tone are what a synthesised dataset
+    gets wrong, and this log exists to become a real one."""
+    import json
+    from app.memory import InteractionLog
+    log = InteractionLog(tmp_path)
+    log.record(chat_id="c1", question="yo whats the deflection dawg",
+               answer="14.07 mm", tools=[{"name": "python_tool", "args": {},
+                                          "result": "14.07"}],
+               sources=["https://example.com"], seconds=3.2)
+    row = json.loads((tmp_path / "interactions.jsonl").read_text(encoding="utf-8"))
+    assert row["question"] == "yo whats the deflection dawg"
+    assert row["tools"][0]["name"] == "python_tool"
+    assert row["sources"] == ["https://example.com"]
+
+
+# ── sources outrank recall ────────────────────────────────────────────────────
+
+def test_figures_absent_from_every_source_are_flagged():
+    from app.memory import unsourced_figures
+    tools = ["The bat weighs 1180 grams and costs 14500 rupees."]
+    missing = unsourced_figures("It weighs 1180 g, costs 14500, and 3200 were sold.",
+                                tools)
+    assert missing == ["3200"]
+
+
+def test_a_figure_present_in_a_source_is_not_flagged():
+    from app.memory import unsourced_figures
+    assert unsourced_figures("The price is 14,500 rupees.",
+                             ["costs 14500 rupees"]) == []
+
+
+def test_rounding_a_sourced_figure_is_not_flagged():
+    """A derived or rounded number is legitimate; flagging it would train the
+    reader to ignore the warning."""
+    from app.memory import unsourced_figures
+    assert unsourced_figures("about 14.07 mm", ["delta = 14.0696 mm"]) == []
+
+
+def test_nothing_is_flagged_when_no_tool_ran():
+    from app.memory import unsourced_figures
+    assert unsourced_figures("The answer is 42000.", []) == []
+
+
 def test_workspace_paths_cannot_escape(tmp_path):
     session = _session([], tmp_path)
     assert "escapes the workspace" in session._write_file("../../evil.txt", "x")

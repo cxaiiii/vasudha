@@ -48,6 +48,7 @@ import webview  # noqa: E402
 from app.backends import Backend, LlamaCppBackend, OllamaBackend, select_backend  # noqa: E402
 from app.bootstrap import ModelStore, DownloadProgress, app_data_dir  # noqa: E402
 from app.history import Chat, ChatStore  # noqa: E402
+from app.memory import InteractionLog, MemoryBook  # noqa: E402
 from app import personas  # noqa: E402
 from app.session import ChatSession, CORE_RULES  # noqa: E402
 from app.settings import Settings, SettingsStore  # noqa: E402
@@ -122,6 +123,10 @@ class Api:
         self._chat = Chat()
         self._settings_store = SettingsStore()
         self._settings = self._settings_store.load()
+        # Shared across chats on purpose: a lesson learned in one
+        # conversation is worthless if the next one cannot see it.
+        self._memory = MemoryBook()
+        self._interactions = InteractionLog()
         self._backend: Optional[Backend] = None
         self._session: Optional[ChatSession] = None
         self._maximised = False
@@ -235,7 +240,9 @@ class Api:
         self._session = ChatSession(
             self._backend,
             system_prompt=personas.build_system_prompt(self._settings.persona, CORE_RULES),
-            workspace=str(self._workspace_for(self._chat.id)))
+            workspace=str(self._workspace_for(self._chat.id)),
+            memory=self._memory,
+            interaction_log=self._interactions)
         self._apply_settings()
         self._needs_setup = False
         self._starting = False
@@ -616,6 +623,8 @@ class Api:
             # a convenience.
             self._session.close()
         self._rebind_workspace()
+        if self._session:
+            self._session.chat_id = self._chat.id
         self._call_js("loadChat", {"events": []})
         self._push_chat_list()
 

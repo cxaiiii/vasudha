@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -46,6 +47,9 @@ CORE_RULES = """Answer briefly and directly. Do not restate the question or pad 
 NUMBERS — python_tool
 For ANY question with a numeric answer, call python_tool and take the number from its real output. Never state a computed value you did not get from the tool. Have the code print the value already converted to the unit asked for.
 Before using a standard formula, name the exact case it belongs to — the support condition, the boundary conditions, the assumptions — and check your formula is the one for THAT case, not a similar one. A coefficient recalled from a neighbouring case gives a confidently wrong answer.
+
+SOURCES OUTRANK YOUR MEMORY — always
+When a tool has returned something, that is the fact. Your own recollection is not a second opinion about it. If a page says a figure and you remember a different one, the page wins and you say what the page says. If a tool result contradicts what you were about to write, discard what you were about to write. Never revise a fetched number toward the one you expected, and never fill a gap in a search result with a remembered figure without saying that is what you did.
 
 FACTS — search_tool, fetch_tool
 For anything current, time-sensitive, or that you are not certain of, search before answering. Search is a process, not a lookup:
@@ -164,6 +168,36 @@ def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
                                     "description": "The complete document body in that format."},
                     },
                     "required": ["title", "format", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember_tool",
+                "description": (
+                    "Write a lesson into your memory book, which you are shown at "
+                    "the start of every chat. Use it when you discover something "
+                    "worth not rediscovering: a tool that behaves unexpectedly, a "
+                    "package this sandbox lacks, a fact you got wrong and then "
+                    "corrected from a source, a technique that worked. Writing the "
+                    "same topic again REPLACES the old lesson, so correct yourself "
+                    "here whenever a source proves an earlier note wrong."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string",
+                                  "description": "Short key, e.g. 'sentiment analysis' "
+                                                 "or 'sandbox packages'. Reusing a topic "
+                                                 "overwrites it."},
+                        "lesson": {"type": "string",
+                                   "description": "One or two sentences, written to be "
+                                                  "useful to yourself later."},
+                        "source": {"type": "string",
+                                   "description": "URL or tool name it came from, if any. "
+                                                  "A lesson with a source outranks one without."},
+                    },
+                    "required": ["topic", "lesson"],
                 },
             },
         },
@@ -366,11 +400,16 @@ def looks_like_document(text: str) -> Optional[str]:
 
 class ChatSession:
     def __init__(self, backend: Backend, system_prompt: str = SYSTEM_PROMPT,
-                 workspace: Optional[str] = None) -> None:
+                 workspace: Optional[str] = None, memory=None,
+                 interaction_log=None) -> None:
         from web.tools import PageFetcher, SandboxedCodeExecutor, WebSearcher
 
         self.backend = backend
         self.system_prompt = system_prompt
+        #: Lessons from earlier sessions, and the log the next dataset is built
+        #: from. Optional so the benchmark harness can run without either.
+        self.memory = memory
+        self.interaction_log = interaction_log
         self.history: list[dict] = []
         self._executor = SandboxedCodeExecutor(timeout=15)
         self._searcher = WebSearcher(max_results=5)
@@ -389,6 +428,8 @@ class ChatSession:
         #: the model's own account of its sources cannot be trusted
         self._searches: list[str] = []
         self._fetches: list[str] = []
+        #: Figures in the reply that no source this turn contained.
+        self._unsourced_line = ""
         self.tools = {
             "python_tool": self._python_tool,
             "search_tool": self._search_tool,
@@ -397,6 +438,7 @@ class ChatSession:
             "browse_tool": self._browse_tool,
             "pip_tool": self._pip_tool,
             "shell_tool": self._shell_tool,
+            "remember_tool": self._remember_tool,
             "write_file": self._write_file,
             "read_file": self._read_file,
             "list_files": self._list_files,
@@ -427,6 +469,12 @@ class ChatSession:
 
     def _python_tool(self, code: str = "", **_: object) -> str:
         return self._executor.execute_python(code, cwd=self._workspace)
+
+    def _remember_tool(self, topic: str = "", lesson: str = "",
+                       source: str = "", **_: object) -> str:
+        if self.memory is None:
+            return "[error] memory is not available in this session"
+        return self.memory.remember(topic, lesson, source)
 
     def _pip_tool(self, packages: str = "", **_: object) -> str:
         from web.tools import PackageInstaller
@@ -575,6 +623,45 @@ class ChatSession:
 
     # -- provenance --------------------------------------------------------
 
+    def _record_turn(self, question: str, answer: str, tools: list[dict],
+                     started: float) -> None:
+        """Append one turn to the training log. Never raises into the turn."""
+        if self.interaction_log is None:
+            return
+        try:
+            self.interaction_log.record(
+                chat_id=getattr(self, "chat_id", ""),
+                question=question, answer=answer, tools=tools,
+                sources=list(dict.fromkeys(self._fetches)),
+                model=getattr(self.backend, "display_name", ""),
+                seconds=time.time() - started)
+        except Exception:  # noqa: BLE001 - logging must not break a reply
+            logger.debug("interaction log failed", exc_info=True)
+
+    def _unsourced_note(self, answer: str, tools: list[dict]) -> str:
+        """A line naming figures in the answer that no tool result contained.
+
+        The rule is that observation outranks recall, and the checkable
+        violation of it is a number that came from nowhere. Advisory, not
+        destructive: a figure can legitimately be derived from ones that are
+        present, so naming them lets a reader check rather than silently
+        deleting something correct.
+        """
+        if not tools:
+            return ""
+        # Only meaningful when the turn actually consulted the world. A pure
+        # python_tool turn produces its own numbers by definition.
+        if not any(t["name"] in ("search_tool", "fetch_tool", "browse_tool")
+                   for t in tools):
+            return ""
+        from app.memory import unsourced_figures
+        missing = unsourced_figures(answer, [t["result"] for t in tools])
+        if not missing:
+            return ""
+        return ("\n\n> **Not in any source read this turn:** "
+                + ", ".join(f"`{m}`" for m in missing)
+                + ". These came from the model's own recall — check them.")
+
     def _provenance_block(self) -> str:
         """A footer describing what this turn ACTUALLY consulted.
 
@@ -589,6 +676,9 @@ class ChatSession:
         says plainly when nothing was read.
         """
         lines = ["", "---", "**How this was produced**", ""]
+        if self._unsourced_line:
+            lines.append(self._unsourced_line.strip())
+            lines.append("")
         if self._searches:
             lines.append("Searched:")
             lines += [f"- `{q}`" for q in dict.fromkeys(self._searches)]
@@ -804,10 +894,21 @@ class ChatSession:
         # Provenance is per-turn: what was read answering the last question
         # says nothing about this one.
         self._searches, self._fetches = [], []
+        self._unsourced_line = ""
         self.last_document = None
 
         self.history.append({"role": "user", "content": text})
-        convo = [{"role": "system", "content": self.system_prompt}] + list(self.history)
+        # The memory book is appended at ask() time rather than baked into
+        # system_prompt, so a lesson written during this turn is visible on the
+        # next one without rebuilding the session.
+        system = self.system_prompt
+        if self.memory is not None:
+            system += self.memory.as_prompt_section()
+        convo = [{"role": "system", "content": system}] + list(self.history)
+
+        turn_started = time.time()
+        turn_tools: list[dict] = []
+        final_answer = ""
 
         budget = self._budget(options)
         last_tool_result = ""
@@ -852,9 +953,14 @@ class ChatSession:
 
             if not completion.tool_calls:
                 if not visible and last_tool_result:
-                    yield {"kind": "text", "text": last_tool_result.strip()}
-                    self.history.append({"role": "assistant", "content": last_tool_result.strip()})
+                    final_answer = last_tool_result.strip()
+                    yield {"kind": "text", "text": final_answer}
+                    self.history.append({"role": "assistant", "content": final_answer})
+                    self._record_turn(text, final_answer, turn_tools, turn_started)
                 else:
+                    final_answer = visible
+                    self._unsourced_line = self._unsourced_note(visible, turn_tools)
+                    self._record_turn(text, final_answer, turn_tools, turn_started)
                     self.history.append({"role": "assistant", "content": visible})
                     # The model was asked to use document_tool for deliverables
                     # and routinely does not; promote what it actually produced.
@@ -889,6 +995,8 @@ class ChatSession:
                        "args": call.args, "id": call.id}
                 result = _clip_tool_result(self._run_tool(call))
                 last_tool_result = result
+                turn_tools.append({"name": call.name, "args": call.args,
+                                   "result": result})
                 yield {"kind": "tool_result", "name": call.name,
                        "result": result, "id": call.id}
 
