@@ -1315,3 +1315,34 @@ async function loadEffort() {
     renderEffort(effortModes.current);
   } catch (e) { /* bridge not up yet; settings load will retry */ }
 }
+
+/* ── Update notice ────────────────────────────────────────────────────
+
+   A line in the chat, not a modal. The app is usable without updating and an
+   interruption would be out of proportion — and it links out to the release
+   rather than downloading anything, because Vasudha does not replace its own
+   executable. */
+
+window.vasudha.onUpdate = (info) => {
+  if (!info || !info.version) return;
+  clearEmptyState();
+  const row = document.createElement('div');
+  row.className = 'msg assistant';
+  row.innerHTML =
+    `<div class="bubble update-note">
+       <strong>Vasudha ${escapeHtml(info.version)} is available.</strong>
+       ${info.summary ? `<div class="update-summary">${escapeHtml(info.summary)}</div>` : ''}
+       <div class="update-actions">
+         <button class="btn-primary" data-open>Open the release page</button>
+         <button class="btn-ghost" data-dismiss>Not now</button>
+       </div>
+       <div class="update-foot">Checked once a day against GitHub. Turn it off
+         in Settings — nothing about this machine is sent either way.</div>
+     </div>`;
+  row.querySelector('[data-open]').addEventListener('click', () => {
+    window.pywebview.api.open_release_page(info.url || '');
+  });
+  row.querySelector('[data-dismiss]').addEventListener('click', () => row.remove());
+  threadInner.appendChild(row);
+  scrollDown(true);
+};

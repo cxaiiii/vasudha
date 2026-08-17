@@ -1347,3 +1347,10 @@ body.yolo-mode #input {
   padding: 1px 5px;
   border-radius: 4px;
 }
+
+/* An update notice, sized as information rather than an interruption. */
+.update-note { border: 1px solid var(--stroke); background: var(--paper); }
+.update-summary { margin-top: 6px; font-size: 13px; color: var(--ink-soft); }
+.update-actions { display: flex; gap: 10px; margin-top: 12px; }
+.update-actions button { padding: 6px 14px; font-size: 12.5px; border-radius: var(--radius-pill); }
+.update-foot { margin-top: 10px; font-size: 11px; color: var(--ink-faint); line-height: 1.5; }

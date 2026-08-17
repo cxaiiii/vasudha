@@ -347,6 +347,53 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── update check ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("candidate,current,expected", [
+    ("v0.5.1", "0.5.0", True),
+    ("0.6.0", "0.5.9", True),
+    ("v0.10.0", "0.9.0", True),        # not a string comparison
+    ("v0.5.0", "0.5.0", False),
+    ("v0.4.9", "0.5.0", False),
+    ("not-a-version", "0.5.0", False),
+    ("", "0.5.0", False),
+])
+def test_version_comparison(candidate, current, expected):
+    from app.updates import is_newer
+    assert is_newer(candidate, current) is expected
+
+
+def test_the_check_is_rate_limited():
+    """A desktop app that asks on every launch is a nuisance on a machine that
+    gets restarted often, and the answer changes far less than daily."""
+    import time
+    from app.updates import due
+    assert due(0) is True
+    assert due(time.time()) is False
+    assert due(time.time() - 25 * 3600) is True
+
+
+def test_the_check_can_be_turned_off():
+    from app.settings import Settings
+    assert Settings().check_updates is True          # default
+    assert Settings(check_updates=False).clamp().check_updates is False
+
+
+def test_only_github_urls_are_opened(tmp_path, monkeypatch):
+    """open_release_page takes a URL from a network response. Restricting the
+    host is what stops a compromised or spoofed reply opening anything else."""
+    import app.main as main
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    api = main.Api.__new__(main.Api)
+    api.open_release_page("https://github.com/cxaiiii/vasudha/releases/tag/v1")
+    api.open_release_page("https://evil.example.com/pwn")
+    api.open_release_page("file:///C:/Windows/System32")
+
+    assert opened == ["https://github.com/cxaiiii/vasudha/releases/tag/v1"]
+
+
 # ── the sandbox must not shadow the model's own files ─────────────────────────
 
 def test_the_workspace_is_importable(tmp_path):

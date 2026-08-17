@@ -107,6 +107,12 @@ class Settings:
     max_iterations: int = 12       # tool calls per turn before giving up
 
     # -- interface -------------------------------------------------------
+    # The only request this app makes that the user did not ask for. A
+    # plain GET of the public releases API, carrying no identifier and no
+    # version, once a day. Off means no request at all.
+    check_updates: bool = True
+    last_update_check: float = 0.0
+
     reduce_motion: bool = False
     send_on_enter: bool = True
 

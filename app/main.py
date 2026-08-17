@@ -247,6 +247,7 @@ class Api:
         self._needs_setup = False
         self._starting = False
         threading.Thread(target=self._warm, daemon=True).start()
+        threading.Thread(target=self._check_updates, daemon=True).start()
 
     @staticmethod
     def _workspace_for(chat_id: str) -> Path:
@@ -271,6 +272,41 @@ class Api:
         if not self._session:
             return
         self._session.set_workspace(str(self._workspace_for(self._chat.id)))
+
+    def _check_updates(self) -> None:
+        """Ask once a day whether a newer release exists, if allowed to.
+
+        On a worker thread and entirely best-effort: an update check must never
+        delay a launch or interrupt anything. It reports; it does not install.
+        """
+        if not self._settings.check_updates:
+            return
+        from app import updates
+        if not updates.due(self._settings.last_update_check):
+            return
+        try:
+            from vasudha.version import __version__ as current
+        except ImportError:
+            current = "0.0.0"
+        try:
+            found = updates.check(current)
+        except Exception:  # noqa: BLE001 - never surface a check failure
+            logger.debug("update check failed", exc_info=True)
+            return
+        self._settings.last_update_check = time.time()
+        self._settings_store.save(self._settings)
+        if found:
+            logger.info("update available: %s", found["version"])
+            self._call_js("onUpdate", found)
+
+    def open_release_page(self, url: str = "") -> None:
+        """Open the release in the user's own browser. Deliberately not a
+        download: this app does not replace its own executable."""
+        import webbrowser
+        from app import updates
+        target = url or updates.RELEASES_PAGE
+        if target.startswith("https://github.com/"):
+            webbrowser.open(target)
 
     def _warm(self) -> None:
         """Prefill the static prompt prefix while the user is still reading the

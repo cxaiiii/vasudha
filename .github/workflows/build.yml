@@ -127,6 +127,33 @@ jobs:
           fi
           ls -lh Vasudha-${{ matrix.name }}.zip
 
+      # An installer, not only a zip. Windows Explorer flags every file it
+      # extracts from a downloaded archive, and .NET then refuses to load
+      # pythonnet's assembly — the app died on launch before showing a window.
+      # app/runtime.py strips the flag as a repair; files placed by an installer
+      # never carry it, which is a fix. Also gives uninstall and a Start Menu
+      # entry, which a zip cannot.
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ "$VERSION" = "$GITHUB_REF_NAME" ] && VERSION="0.0.0"   # not a tag build
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$ISCC" ]; then
+            choco install innosetup -y --no-progress
+          fi
+          "$ISCC" //DAppVersion="$VERSION" packaging/vasudha.iss
+          ls -lh dist/Vasudha-*-setup.exe
+
+      - name: Upload the installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vasudha-windows-installer
+          path: dist/Vasudha-*-setup.exe
+          retention-days: 14
+
       - uses: actions/upload-artifact@v4
         with:
           name: Vasudha-${{ matrix.name }}
@@ -137,4 +164,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Vasudha-${{ matrix.name }}.zip
+          # The installer is the recommended download on Windows; the zip stays
+          # for anyone who wants a portable copy or does not want an installer.
+          files: |
+            dist/Vasudha-${{ matrix.name }}.zip
+            dist/Vasudha-*-setup.exe
