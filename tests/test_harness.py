@@ -347,6 +347,92 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── the sandbox must not shadow the model's own files ─────────────────────────
+
+def test_the_workspace_is_importable(tmp_path):
+    """`from script import *` is how a model runs the file it has been editing.
+
+    It failed: the scratch file was itself named script.py and Python puts the
+    running script's directory at sys.path[0], so the import resolved to the
+    scratch file, recursively, and reported a NameError for code that was
+    correct. Three turns were spent on it.
+    """
+    from web.tools import SandboxedCodeExecutor
+    (tmp_path / "script.py").write_text("def solve(x):\n    return x * 2\nstart = 21\n",
+                                        encoding="utf-8")
+    out = SandboxedCodeExecutor(timeout=30).execute_python(
+        "from script import *\nprint(solve(start))", cwd=str(tmp_path))
+    assert "42" in out
+
+
+def test_the_scratch_file_is_not_importable_by_accident(tmp_path):
+    """Whatever the scratch is called, it must not be a name a model would use."""
+    from web.tools import SandboxedCodeExecutor
+    out = SandboxedCodeExecutor(timeout=30).execute_python(
+        "import os, sys\nprint(os.path.basename(sys.argv[0]))", cwd=str(tmp_path))
+    assert "script.py" not in out
+    assert "_vasudha_run.py" in out
+
+
+# ── a broken file is reported when it is written ──────────────────────────────
+
+def test_unquoted_marker_is_caught_at_write_time(tmp_path):
+    """The observed failure: ('X','X','X') edited into (X,X,X). Syntactically
+    perfect, certain to raise, and it survived three further edits and two runs
+    before a traceback pointed at it."""
+    session = _session([], tmp_path)
+    out = session._write_file("grid.py", "grid = [\n    [(1,0,'S'),(X,X,X)],\n]\n")
+    assert "never defined" in out
+    assert "X (line 2)" in out
+
+
+def test_a_syntax_error_is_caught_at_write_time(tmp_path):
+    session = _session([], tmp_path)
+    out = session._write_file("bad.py", "def f(:\n    pass\n")
+    assert "not valid Python" in out
+
+
+def test_an_edit_that_breaks_the_file_is_reported(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "x = 1\ny = 2\n")
+    out = session._edit_file("a.py", "y = 2", "y = (")
+    assert "one replacement made" in out       # the edit still happened
+    assert "not valid Python" in out           # and it said what it did
+
+
+def test_ordinary_code_is_not_warned_about(tmp_path):
+    """A warning on valid code is worse than no warning: it teaches the model
+    to ignore the channel."""
+    session = _session([], tmp_path)
+    source = (
+        "import heapq\n"
+        "from math import sqrt\n\n"
+        "class Node:\n"
+        "    def __init__(self, cost):\n"
+        "        self.cost = cost\n\n"
+        "def solve(grid, start):\n"
+        "    seen = {start}\n"
+        "    roots = [sqrt(v) for v in range(3)]\n"
+        "    try:\n"
+        "        heapq.heappush(roots, 1)\n"
+        "    except ValueError as exc:\n"
+        "        print(exc)\n"
+        "    return Node(roots), seen\n")
+    assert session._write_file("ok.py", source).strip().endswith("chars to ok.py]")
+
+
+def test_import_star_disables_the_undefined_check(tmp_path):
+    """It can introduce any name, so nothing said afterwards would be sound."""
+    session = _session([], tmp_path)
+    out = session._write_file("s.py", "from os.path import *\nprint(join('a','b'), mystery)\n")
+    assert "never defined" not in out
+
+
+def test_non_python_files_are_left_alone(tmp_path):
+    session = _session([], tmp_path)
+    assert "WARNING" not in session._write_file("notes.txt", "not python (((")
+
+
 # ── retrieval over the conversation's own tool output ─────────────────────────
 
 def _busy_session_memory():

@@ -134,7 +134,13 @@ def _sandbox_env(work_dir: str) -> dict:
     granting access to the real user profile.
 
     PYTHONPATH carries the pip_tool install directory, which is what makes an
-    installed package importable on the *next* python_tool call.
+    installed package importable on the *next* python_tool call, and the
+    working directory itself, which is what makes `import script` find the
+    model's own file. Without the second entry the workspace is the process's
+    cwd but not on the import path — Python uses the *script's* directory for
+    that, and the script lives in a scratch dir — so a model that wrote
+    script.py and then ran `from script import *` got an import error for code
+    that was correct.
     """
     return {
         "PATH": os.environ.get("PATH", ""),
@@ -147,7 +153,7 @@ def _sandbox_env(work_dir: str) -> dict:
         "HOME": work_dir,
         "HOMEDRIVE": os.path.splitdrive(work_dir)[0],
         "HOMEPATH": os.path.splitdrive(work_dir)[1],
-        "PYTHONPATH": packages_dir(),
+        "PYTHONPATH": os.pathsep.join([work_dir, packages_dir()]),
         "PYTHONUNBUFFERED": "1",
         "PYTHONIOENCODING": "utf-8",
     }
@@ -285,7 +291,15 @@ class SandboxedCodeExecutor:
         clean_code = _strip_code_fences(code_str)
 
         scratch_dir = tempfile.mkdtemp(prefix="vasudha_exec_")
-        script_path = os.path.join(scratch_dir, "script.py")
+        # NOT "script.py". Python puts the running script's own directory at
+        # sys.path[0], so a scratch file called script.py shadows a workspace
+        # file of the same name — and `from script import *`, which is how a
+        # model naturally runs the file it has been editing, imported the
+        # scratch file into itself. Observed as a recursive self-import
+        # reporting "NameError: name 'a_star' is not defined" from code that
+        # was perfectly correct. The leading underscore and the prefix make an
+        # accidental import essentially impossible.
+        script_path = os.path.join(scratch_dir, "_vasudha_run.py")
 
         if cwd is not None:
             temp_dir = cwd          # where the code runs and writes its files

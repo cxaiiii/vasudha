@@ -818,8 +818,40 @@ class ChatSession:
             self._file_tools = WorkspaceFileTools(root)
         return self._file_tools
 
+    @staticmethod
+    def _syntax_note(path: str, content: str) -> str:
+        """Compile a Python file after writing it, and say so if it is broken.
+
+        Costs microseconds and saves turns. Observed: an edit replaced quoted
+        obstacle markers with bare names — `(X,X,X)` instead of `('X','X','X')`
+        — and the file stayed broken through three more edits and two runs
+        before a traceback finally pointed at it. A syntax error is knowable the
+        instant the file is written, so it should be reported then rather than
+        discovered later somewhere unrelated.
+        """
+        if not path.lower().endswith(".py"):
+            return ""
+        try:
+            tree = compile(content, path, "exec", _AST_FLAG)
+        except SyntaxError as exc:
+            line = f" on line {exc.lineno}" if exc.lineno else ""
+            detail = (exc.text or "").strip()
+            return (f"\n[WARNING: {path} is not valid Python{line}: {exc.msg}."
+                    + (f"\n  {detail}" if detail else "")
+                    + "\n Fix this before running it — nothing will import.]")
+        except ValueError:
+            return ""            # null bytes and similar; not our problem here
+
+        undefined = _undefined_names(tree)
+        if undefined:
+            listed = ", ".join(f"{name} (line {line})" for name, line in undefined[:4])
+            return (f"\n[WARNING: {path} uses names that are never defined: {listed}."
+                    "\n This will raise NameError when it runs. A common cause is a "
+                    "quoted value written unquoted — ('X','X','X') became (X,X,X).]")
+        return ""
+
     def _write_file(self, path: str = "", content: str = "", **_: object) -> str:
-        return self._files().write_file(path, content)
+        return self._files().write_file(path, content) + self._syntax_note(path, content)
 
     def _read_file(self, path: str = "", **_: object) -> str:
         """Read a file with line numbers.
@@ -902,10 +934,11 @@ class ChatSession:
         if occurrences > 1:
             return (f"[error] that text appears {occurrences} times in {path}. "
                     "Include more surrounding lines so it matches exactly once.")
-        result = files.write_file(path, current.replace(old_text, new_text))
+        updated = current.replace(old_text, new_text)
+        result = files.write_file(path, updated)
         if result.startswith("[Error"):
             return result
-        return f"[edited {path}] one replacement made"
+        return f"[edited {path}] one replacement made" + self._syntax_note(path, updated)
 
     # -- provenance --------------------------------------------------------
 
@@ -1396,6 +1429,59 @@ _NUMERICAL_TROUBLE = (
     ("nan", "the output contains NaN"),
     ("inf", "the output contains infinity"),
 )
+
+
+import ast as _ast
+
+_AST_FLAG = _ast.PyCF_ONLY_AST
+
+
+def _undefined_names(tree) -> list[tuple[str, int]]:
+    """Names the file reads but never defines anywhere.
+
+    Not a type checker and not trying to be. It catches one specific, observed
+    mistake: a quoted value written unquoted, so ('X','X','X') becomes (X,X,X)
+    and the file stays syntactically perfect while being certain to raise. In
+    the reported session that survived three further edits and two runs before
+    a traceback finally pointed at it.
+
+    Scope is deliberately flattened — every binding anywhere in the file counts
+    as defined — because the cost of a false positive here is a warning that
+    trains the model to ignore warnings, while the cost of a false negative is
+    only that we failed to help. `import *` disables the check entirely, since
+    it can introduce any name at all and nothing said afterwards would be sound.
+    """
+    import builtins
+
+    defined: set[str] = set()
+    used: list[tuple[str, int]] = []
+
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            return []
+        if isinstance(node, _ast.Name):
+            (defined.add(node.id) if isinstance(node.ctx, (_ast.Store, _ast.Del))
+             else used.append((node.id, node.lineno)))
+        elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            for alias in node.names:
+                defined.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, _ast.arg):
+            defined.add(node.arg)
+        elif isinstance(node, _ast.ExceptHandler) and node.name:
+            defined.add(node.name)
+        elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
+            defined.update(node.names)
+
+    known = defined | set(dir(builtins)) | {"__name__", "__file__", "__doc__"}
+    seen: set[str] = set()
+    missing: list[tuple[str, int]] = []
+    for name, line in used:
+        if name not in known and name not in seen:
+            seen.add(name)
+            missing.append((name, line))
+    return missing
 
 
 def _flag_numerical_failure(result: str) -> str:
