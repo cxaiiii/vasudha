@@ -66,6 +66,12 @@
     <div id="composer">
       <!-- Attached files sit above the box, not inside the message: the model
            is given a description of each, never its contents. -->
+      <!-- How hard to try. One control for the four things that actually bound
+           a turn: reply length, context, tool budget, tool timeout. -->
+      <div id="effort-row">
+        <div id="effort" role="radiogroup" aria-label="Effort"></div>
+        <span id="effort-blurb"></span>
+      </div>
       <div id="attachments"></div>
       <div id="composer-inner">
         <button id="attach" title="Attach a file for the model to work on">&#128206;</button>

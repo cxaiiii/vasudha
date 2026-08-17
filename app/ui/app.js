@@ -380,6 +380,31 @@ window.vasudha = {
         currentAssistant.appendChild(err);
         break;
 
+      /* What the turn cost, in the engine's own units. Quiet by design: it is
+         there when you look for it and not competing with the answer. */
+      case 'stats': {
+        if (!currentAssistant) break;
+        const line = document.createElement('div');
+        line.className = 'stats-line';
+        const bits = [];
+        if (evt.tps) bits.push(`${evt.tps} tok/s`);
+        if (evt.out_tokens) bits.push(`${evt.out_tokens.toLocaleString()} out`);
+        if (evt.context_limit) {
+          const pct = Math.round((evt.context_tokens / evt.context_limit) * 100);
+          bits.push(`context ${evt.context_tokens.toLocaleString()}/` +
+                    `${evt.context_limit.toLocaleString()} (${pct}%)`);
+        }
+        if (evt.seconds) bits.push(`${evt.seconds}s`);
+        line.textContent = bits.join('  ·  ');
+        // Warn only where it matters: near the window the next turn is the one
+        // that gets compacted, and that is worth seeing before it happens.
+        if (evt.context_limit &&
+            evt.context_tokens / evt.context_limit > 0.75) line.classList.add('tight');
+        currentAssistant.appendChild(line);
+        scrollDown();
+        break;
+      }
+
       case 'done':
         finishStream(null);       // a turn cut short still shows what arrived
         thinkStreamBody = null;
@@ -1077,7 +1102,13 @@ $('#s-clear-history').addEventListener('click', async () => {
   await window.pywebview.api.clear_history();
 });
 
-window.vasudha.onSettings = paintSettings;
+window.vasudha.onSettings = (values) => {
+  paintSettings(values);
+  // The effort table is fetched rather than duplicated here, and settings
+  // arriving is the first moment the bridge is known to be up.
+  if (!effortModes) loadEffort();
+  else renderEffort(values.effort || effortModes.current);
+};
 window.vasudha.setDataPath = (p) => { $('#s-data-path').textContent = p; };
 
 /* ── First-run persona picker ────────────────────────────────────────── */
@@ -1185,3 +1216,58 @@ $('#attach').addEventListener('click', async () => {
     window.vasudha.onEvent({ kind: 'error', text: String(e) });
   }
 });
+
+/* ── Effort modes ─────────────────────────────────────────────────────
+
+   One control for the four bounds that decide what a turn can do. The table
+   lives in Python (app/settings.EFFORT_MODES) and is fetched, so there is no
+   second copy here to drift out of step with it. */
+
+let effortModes = null;
+
+function renderEffort(current) {
+  const box = $('#effort');
+  if (!effortModes) return;
+  box.innerHTML = '';
+  effortModes.order.forEach((name) => {
+    const mode = effortModes.modes[name];
+    const btn = document.createElement('button');
+    btn.className = 'effort-seg' + (name === current ? ' on' : '') +
+                    (name === 'yolo' ? ' yolo' : '');
+    btn.textContent = mode.label;
+    btn.setAttribute('role', 'radio');
+    btn.setAttribute('aria-checked', String(name === current));
+    btn.title = mode.blurb;
+    btn.addEventListener('click', () => setEffort(name));
+    box.appendChild(btn);
+  });
+  document.body.classList.toggle('yolo-mode', current === 'yolo');
+  $('#effort-blurb').textContent = effortModes.modes[current]
+    ? effortModes.modes[current].blurb : '';
+}
+
+async function setEffort(name) {
+  try {
+    const result = await window.pywebview.api.set_effort(name);
+    effortModes.current = result.effort;
+    renderEffort(result.effort);
+    /* The context window is fixed when the model loads, so a mode that raises
+       it cannot apply until the next launch. Saying so beats running at a
+       window the user did not choose — this app already shipped that bug. */
+    if (result.context_pending) {
+      $('#effort-blurb').textContent =
+        `${effortModes.modes[result.effort].blurb} ` +
+        `Context stays at ${result.loaded_ctx.toLocaleString()} until you restart ` +
+        `(this mode wants ${result.num_ctx.toLocaleString()}).`;
+    }
+  } catch (e) {
+    window.vasudha.onEvent({ kind: 'error', text: String(e) });
+  }
+}
+
+async function loadEffort() {
+  try {
+    effortModes = await window.pywebview.api.effort_modes();
+    renderEffort(effortModes.current);
+  } catch (e) { /* bridge not up yet; settings load will retry */ }
+}

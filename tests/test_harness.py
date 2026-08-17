@@ -346,6 +346,40 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── effort modes ──────────────────────────────────────────────────────────────
+
+def test_every_mode_survives_clamping():
+    """A mode must not promise a bound the app then quietly reduces.
+
+    YOLO declared 300s and 40 iterations while clamp() capped them at 120 and
+    32, so the UI advertised limits that were never applied. Settings claiming
+    something the engine will not honour is the exact failure this file exists
+    to prevent.
+    """
+    from app.settings import EFFORT_MODES, Settings
+    for name, mode in EFFORT_MODES.items():
+        settings = Settings().apply_effort(name)
+        for field in ("num_predict", "num_ctx", "max_iterations", "tool_timeout"):
+            assert getattr(settings, field) == mode[field], (
+                f"{name}.{field} was clamped from {mode[field]} "
+                f"to {getattr(settings, field)}")
+
+
+def test_modes_increase_monotonically():
+    from app.settings import EFFORT_MODES, EFFORT_ORDER
+    for field in ("num_predict", "num_ctx", "max_iterations", "tool_timeout"):
+        values = [EFFORT_MODES[n][field] for n in EFFORT_ORDER]
+        assert values == sorted(values), f"{field} is not monotonic: {values}"
+
+
+def test_an_unknown_mode_falls_back_rather_than_breaking():
+    from app.settings import Settings
+    assert Settings(effort="turbo").clamp().effort == "medium"
+    # ...and an unknown name applied is simply ignored.
+    settings = Settings().apply_effort("medium")
+    assert settings.apply_effort("nonsense").effort == "medium"
+
+
 # ── attachments ───────────────────────────────────────────────────────────────
 
 def _big_csv(tmp_path, rows=5000):

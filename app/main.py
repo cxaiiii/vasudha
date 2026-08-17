@@ -433,6 +433,31 @@ class Api:
         self._apply_settings()
         return asdict(self._settings)
 
+    def effort_modes(self) -> dict:
+        """The mode table, so the UI does not carry a second copy of it."""
+        from app.settings import EFFORT_MODES, EFFORT_ORDER
+        return {"order": EFFORT_ORDER, "modes": EFFORT_MODES,
+                "current": self._settings.effort}
+
+    def set_effort(self, name: str) -> dict:
+        """Switch mode. Everything but the context window takes effect now.
+
+        n_ctx is fixed when the model loads, so a mode that raises it cannot
+        apply until the next launch — and saying so is better than silently
+        running at a window the user did not pick, which this app has already
+        shipped once.
+        """
+        self._settings.apply_effort(name)
+        self._settings_store.save(self._settings)
+        self._apply_settings()
+
+        loaded = getattr(self._backend, "context_limit", None)
+        pending = bool(loaded and loaded != self._settings.num_ctx)
+        return {"effort": self._settings.effort,
+                "num_ctx": self._settings.num_ctx,
+                "loaded_ctx": loaded or 0,
+                "context_pending": pending}
+
     def reset_settings(self) -> dict:
         self._settings = Settings()
         self._settings_store.save(self._settings)

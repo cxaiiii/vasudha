@@ -702,6 +702,25 @@ class ChatSession:
 
     # -- provenance --------------------------------------------------------
 
+    def _stats_event(self, out_tokens: int, started: float) -> dict:
+        """What the turn cost, in the engine's own units.
+
+        Token counts come from the backend rather than from a character-count
+        heuristic here, because only the engine knows what it actually
+        tokenized — and the context figure is meaningless unless it is measured
+        the same way the window is.
+        """
+        elapsed = time.time() - started
+        limit = getattr(self.backend, "context_limit", None)
+        return {
+            "kind": "stats",
+            "tps": round(getattr(self.backend, "observed_tps", 0) or 0, 1),
+            "out_tokens": out_tokens,
+            "context_tokens": getattr(self.backend, "last_prompt_tokens", 0),
+            "context_limit": limit or 0,
+            "seconds": round(elapsed, 1),
+        }
+
     def _record_turn(self, question: str, answer: str, tools: list[dict],
                      started: float) -> None:
         """Append one turn to the training log. Never raises into the turn."""
@@ -988,6 +1007,7 @@ class ChatSession:
 
         turn_started = time.time()
         turn_tools: list[dict] = []
+        out_tokens = 0
         final_answer = ""
 
         budget = self._budget(options)
@@ -1016,6 +1036,8 @@ class ChatSession:
                 yield {"kind": "error", "text": str(exc)}
                 return
 
+            out_tokens += getattr(self.backend, "last_completion_tokens", 0)
+
             if completion.thinking:
                 yield {"kind": "thinking", "text": completion.thinking}
 
@@ -1035,10 +1057,12 @@ class ChatSession:
                 if not visible and last_tool_result:
                     final_answer = last_tool_result.strip()
                     yield {"kind": "text", "text": final_answer}
+                    yield self._stats_event(out_tokens, turn_started)
                     self.history.append({"role": "assistant", "content": final_answer})
                     self._record_turn(text, final_answer, turn_tools, turn_started)
                 else:
                     final_answer = visible
+                    yield self._stats_event(out_tokens, turn_started)
                     self._unsourced_line = self._unsourced_note(visible, turn_tools)
                     self._record_turn(text, final_answer, turn_tools, turn_started)
                     self.history.append({"role": "assistant", "content": visible})

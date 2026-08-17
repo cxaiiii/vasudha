@@ -23,6 +23,40 @@ def _settings_path() -> Path:
     return app_data_dir() / "settings.json"
 
 
+#: One knob for how hard to try. Each mode sets the four things that actually
+#: bound a turn: how much the model may write, how much it may remember, how
+#: many tool calls it gets, and how long any one of them may run.
+#:
+#: num_ctx is the odd one out and deliberately so — the built-in engine fixes
+#: its window when the model loads, so a change here takes effect on the next
+#: launch rather than mid-conversation. Everything else applies immediately.
+EFFORT_MODES: dict[str, dict] = {
+    "low": dict(
+        label="Low", num_predict=512, num_ctx=4096,
+        max_iterations=3, tool_timeout=15,
+        blurb="Quick answers. One or two tools at most."),
+    "medium": dict(
+        label="Medium", num_predict=2048, num_ctx=8192,
+        max_iterations=8, tool_timeout=30,
+        blurb="The default. Enough room to search, compute and answer."),
+    "high": dict(
+        label="High", num_predict=4096, num_ctx=16384,
+        max_iterations=16, tool_timeout=60,
+        blurb="Longer research. Multi-step work with several sources."),
+    "max": dict(
+        label="Max", num_predict=8192, num_ctx=32768,
+        max_iterations=24, tool_timeout=120,
+        blurb="Everything it has. Slow, and worth it for real reports."),
+    "yolo": dict(
+        label="YOLO", num_predict=16384, num_ctx=65536,
+        max_iterations=40, tool_timeout=300,
+        blurb="No limits worth the name. It will run until it is finished "
+              "or you stop it — and on a 4B that can be a very long time."),
+}
+
+EFFORT_ORDER = ["low", "medium", "high", "max", "yolo"]
+
+
 @dataclass
 class Settings:
     # -- engine ----------------------------------------------------------
@@ -50,6 +84,11 @@ class Settings:
     # +27% prefill on a 740M/RTX-4050 laptop. The startup banner lists devices
     # found, not the device chosen — set VASUDHA_DEBUG to see it.
     gpu_device: int = -1
+
+    #: Which EFFORT_MODES entry is selected. The individual values above stay
+    #: authoritative — a mode writes into them — so hand-editing one still
+    #: works and is not silently reverted on next launch.
+    effort: str = "medium"
 
     # -- identity --------------------------------------------------------
     persona: str = "engineer"
@@ -81,8 +120,12 @@ class Settings:
         self.top_p = min(max(float(self.top_p), 0.01), 1.0)
         self.num_predict = min(max(int(self.num_predict), 256), 16384)
         self.num_ctx = min(max(int(self.num_ctx), 2048), 262144)
-        self.tool_timeout = min(max(int(self.tool_timeout), 1), 120)
-        self.max_iterations = min(max(int(self.max_iterations), 1), 32)
+        # Ceilings sized so the loudest EFFORT_MODES entry survives them. They
+        # used to be 120 and 32, which silently cut YOLO's declared 300s and 40
+        # iterations down — a setting promising something the app would not
+        # honour, which is the failure this file exists to prevent.
+        self.tool_timeout = min(max(int(self.tool_timeout), 1), 600)
+        self.max_iterations = min(max(int(self.max_iterations), 1), 64)
         self.n_batch = min(max(int(self.n_batch), 32), 4096)
         # 0 stays 0: it is the sentinel for "detect", not a value to clamp up.
         self.n_threads = max(int(self.n_threads), 0)
@@ -90,7 +133,21 @@ class Settings:
         self.gpu_device = max(int(self.gpu_device), -1)
         if self.backend not in ("auto", "ollama", "builtin"):
             self.backend = "auto"
+        if self.effort not in EFFORT_MODES:
+            self.effort = "medium"
         return self
+
+    def apply_effort(self, name: str) -> "Settings":
+        """Set the four bounds a mode controls, and record which mode it was."""
+        mode = EFFORT_MODES.get(name)
+        if not mode:
+            return self
+        self.effort = name
+        self.num_predict = mode["num_predict"]
+        self.num_ctx = mode["num_ctx"]
+        self.max_iterations = mode["max_iterations"]
+        self.tool_timeout = mode["tool_timeout"]
+        return self.clamp()
 
     def generation_options(self) -> dict:
         return {

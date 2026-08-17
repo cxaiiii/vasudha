@@ -563,6 +563,14 @@ class Backend:
     #: engine never had.
     downgraded_from: Optional[int] = None
 
+    #: Per-call accounting, refreshed by stream(). Reported rather than derived
+    #: in the session, because only the backend knows what the engine actually
+    #: tokenized: a character count divided by a guess would drift from the
+    #: number the context window is really measured in.
+    last_completion_tokens: int = 0
+    last_prompt_tokens: int = 0
+    last_prefill_seconds: Optional[float] = None
+
     def close(self) -> None:
         pass
 
@@ -661,6 +669,12 @@ class OllamaBackend(Backend):
                 if chunk.get("done"):
                     eval_count = chunk.get("eval_count") or 0
                     eval_ns = chunk.get("eval_duration") or 0
+                    # ollama reports both sides of the ledger itself, so these
+                    # are its numbers rather than our reconstruction of them.
+                    self.last_completion_tokens = eval_count
+                    self.last_prompt_tokens = chunk.get("prompt_eval_count") or 0
+                    prefill_ns = chunk.get("prompt_eval_duration") or 0
+                    self.last_prefill_seconds = (prefill_ns / 1e9) if prefill_ns else None
         finally:
             response.close()
 
@@ -874,6 +888,10 @@ class LlamaCppBackend(Backend):
             self.observed_tps = (produced - 1) / decode_span
         self.last_prefill_seconds = (
             (first_token_at - started) if first_token_at else None)
+        # Each streamed chunk from llama.cpp is exactly one token, so this is a
+        # count rather than an estimate.
+        self.last_completion_tokens = produced
+        self.last_prompt_tokens = self.count_tokens(prompt)
 
         # Re-attach the opener the template supplied, so the non-streaming
         # parse sees the same balanced text the filter did.

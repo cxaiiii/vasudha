@@ -1225,3 +1225,81 @@ body.resizing * { pointer-events: none; user-select: none !important; }
   border: 1px solid var(--stroke-soft);
   border-radius: 10px;
 }
+
+/* ── Effort modes ───────────────────────────────────────────────────────── */
+
+#effort-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 4px 8px;
+  min-width: 0;
+}
+#effort {
+  flex: none;
+  display: inline-flex;
+  padding: 2px;
+  background: var(--paper-deep);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pill);
+}
+.effort-seg {
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: var(--ink-soft);
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.effort-seg:hover { color: var(--ink); }
+.effort-seg.on {
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow-soft);
+}
+#effort-blurb {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  opacity: 0.75;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* YOLO announces itself. Not decoration: it removes every limit that stops a
+   4B running for a very long time, and a mode that expensive should not look
+   the same as the one beside it. */
+.effort-seg.yolo.on {
+  background: linear-gradient(100deg, var(--saffron), #FF8A3D, var(--saffron));
+  background-size: 220% 100%;
+  color: #fff;
+  animation: yolo-sweep 2.6s linear infinite;
+}
+@keyframes yolo-sweep { to { background-position: 220% 0; } }
+
+/* A hairline along the composer while it is armed — visible at the edge of
+   vision without sitting on top of anything. */
+body.yolo-mode #composer-inner {
+  border-color: rgba(249, 62, 0, 0.55);
+  box-shadow: 0 0 0 1px rgba(249, 62, 0, 0.18), var(--shadow-soft);
+}
+body.reduce-motion .effort-seg.yolo.on { animation: none; }
+
+/* ── Per-turn cost ──────────────────────────────────────────────────────── */
+
+.stats-line {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+.stats-line.tight { color: var(--saffron); opacity: 0.85; }
