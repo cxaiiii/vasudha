@@ -562,6 +562,8 @@ class Backend:
     #: so the UI can say so rather than letting Settings claim a window the
     #: engine never had.
     downgraded_from: Optional[int] = None
+    #: Plain-language reason, shown to the user rather than logged only.
+    downgrade_reason: str = ""
 
     #: Per-call accounting, refreshed by stream(). Reported rather than derived
     #: in the session, because only the backend knows what the engine actually
@@ -1003,13 +1005,27 @@ def select_backend(model_path: Optional[str], ollama_model_hint: str = "vasudha"
         fits with room.
         """
         gpu = LlamaCppBackend.gpu_available()
+
+        # Cap against measured hardware before the engine sees it. An effort
+        # mode may ask for 65,536 tokens; on a 6 GB card that is 8.6 GB of KV
+        # cache alone and the load fails with a message about the file. The
+        # header parse this needs takes ~230ms and reads no tensors.
+        from app.hardware import max_context
+        effective_ctx, capped_why = max_context(model_path or "", gpu, int(n_ctx))
+        if capped_why:
+            logger.warning("%s", capped_why)
+
         logger.info("loading model (gpu=%s, n_ctx=%s, n_batch=%s)",
-                    gpu, n_ctx, n_batch)
+                    gpu, effective_ctx, n_batch)
         try:
-            return LlamaCppBackend(model_path, n_ctx=n_ctx,
-                                   n_gpu_layers=-1 if gpu else 0,
-                                   n_batch=n_batch,
-                                   n_threads=n_threads or None)
+            backend = LlamaCppBackend(model_path, n_ctx=effective_ctx,
+                                      n_gpu_layers=-1 if gpu else 0,
+                                      n_batch=n_batch,
+                                      n_threads=n_threads or None)
+            if capped_why:
+                backend.downgraded_from = int(n_ctx)
+                backend.downgrade_reason = capped_why
+            return backend
         except Exception as exc:  # noqa: BLE001 - reframed, then re-raised
             name = os.path.basename(model_path or "model")
             # Order matters. A machine with two GPUs is the more common cause

@@ -1255,13 +1255,38 @@ function renderEffort(current) {
     btn.setAttribute('role', 'radio');
     btn.setAttribute('aria-checked', String(name === current));
     btn.title = mode.blurb;
-    btn.addEventListener('click', () => setEffort(name));
+    btn.addEventListener('click', () => { setEffort(name); collapseEffort(); });
     box.appendChild(btn);
   });
+  const mode = effortModes.modes[current];
+  $('#effort-current').textContent = mode ? mode.label : '';
+  $('#effort-toggle').title = mode ? mode.blurb : 'How hard to try';
+  $('#effort-toggle').classList.toggle('yolo', current === 'yolo');
   document.body.classList.toggle('yolo-mode', current === 'yolo');
-  $('#effort-blurb').textContent = effortModes.modes[current]
-    ? effortModes.modes[current].blurb : '';
 }
+
+/* Collapsed by default. Expanded it is a five-segment control, which is too
+   much furniture to leave sitting above the text box permanently. */
+function expandEffort() {
+  $('#effort-wrap').classList.add('open');
+  $('#effort-toggle').setAttribute('aria-expanded', 'true');
+}
+function collapseEffort() {
+  $('#effort-wrap').classList.remove('open');
+  $('#effort-toggle').setAttribute('aria-expanded', 'false');
+}
+
+$('#effort-toggle').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const wrap = $('#effort-wrap');
+  wrap.classList.contains('open') ? collapseEffort() : expandEffort();
+});
+document.addEventListener('click', (e) => {
+  if (!$('#effort-wrap').contains(e.target)) collapseEffort();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') collapseEffort();
+});
 
 async function setEffort(name) {
   try {
@@ -1272,10 +1297,12 @@ async function setEffort(name) {
        it cannot apply until the next launch. Saying so beats running at a
        window the user did not choose — this app already shipped that bug. */
     if (result.context_pending) {
-      $('#effort-blurb').textContent =
-        `${effortModes.modes[result.effort].blurb} ` +
-        `Context stays at ${result.loaded_ctx.toLocaleString()} until you restart ` +
-        `(this mode wants ${result.num_ctx.toLocaleString()}).`;
+      window.vasudha.onEvent({
+        kind: 'status',
+        text: `Context stays at ${result.loaded_ctx.toLocaleString()} tokens until ` +
+              `you restart (this mode asks for ${result.num_ctx.toLocaleString()}, ` +
+              `and it may be capped to what your hardware holds).`,
+      });
     }
   } catch (e) {
     window.vasudha.onEvent({ kind: 'error', text: String(e) });

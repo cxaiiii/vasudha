@@ -347,8 +347,12 @@ class Api:
         downgraded = getattr(self._backend, "downgraded_from", None)
         actual = getattr(self._backend, "context_limit", None)
         if downgraded and actual:
-            detail += (f" The {downgraded:,}-token context did not fit in memory, "
-                       f"so this chat holds {actual:,} tokens.")
+            # The backend explains itself in plain language when it can;
+            # the generic sentence is the fallback.
+            why = getattr(self._backend, "downgrade_reason", "")
+            detail += " " + (why or
+                             f"The {downgraded:,}-token context did not fit in "
+                             f"memory, so this chat holds {actual:,} tokens.")
         self._call_js("onBackend", {
             "label": self._backend.display_name,
             "fast": fast,
