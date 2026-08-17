@@ -347,6 +347,134 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── retrieval over the conversation's own tool output ─────────────────────────
+
+def _busy_session_memory():
+    """A GMM fit early, then twenty turns of unrelated work on top of it —
+    the shape of the session that lost track of its own results."""
+    from app.retrieval import ToolMemory
+    memory = ToolMemory()
+    memory.add(3, "python_tool", {"code": "gmm.fit(X)"},
+               "[Stdout]:\nFitted 2-component GMM on 500 samples\n"
+               "means: [2.014, 7.982]\nlog-likelihood: -1043.27")
+    for turn in range(4, 25):
+        memory.add(turn, "python_tool", {"code": f"step_{turn}()"},
+                   f"[Stdout]:\nintermediate result {turn}: ok")
+    return memory
+
+
+def test_a_buried_result_is_recalled_by_name():
+    memory = _busy_session_memory()
+    hits = memory.search("what were the GMM component means?", limit=2)
+    assert hits, "the fit was not recalled at all"
+    assert "2.014" in hits[0].result
+
+
+def test_recall_names_the_turn_it_came_from():
+    """Provenance survives retrieval: the model is told this came from turn 3,
+    not handed an anonymous fragment it might treat as its own reasoning."""
+    block = _busy_session_memory().recall_block("GMM means")
+    assert "[turn 3]" in block
+    assert "outranks your recollection" in block
+
+
+def test_recall_stays_inside_its_budget():
+    memory = _busy_session_memory()
+    memory.add(2, "fetch_tool", {"url": "http://x"}, "GMM " + "padding " * 5000)
+    assert len(memory.recall_block("GMM", budget=1400)) < 2200
+
+
+def test_the_current_turn_is_not_recalled_into_itself():
+    memory = _busy_session_memory()
+    hits = memory.search("intermediate result", exclude_turns={24}, limit=5)
+    assert all(h.turn != 24 for h in hits)
+
+
+def test_an_unrelated_question_recalls_nothing():
+    """Retrieval that always fires is noise: it spends context on every turn
+    and teaches the model to ignore the block."""
+    assert _busy_session_memory().recall_block("what is the capital of France") == ""
+
+
+def test_lexical_retrieval_misses_a_synonym():
+    """A known and accepted limitation, recorded rather than hidden.
+
+    The store holds "std 3.02"; asking for "standard deviation" shares no term
+    with it and retrieves nothing. Keyword matching finds named things — a
+    variable, an exception, a column — and does not bridge vocabulary. This is
+    the case that would justify embeddings, and the test exists so that
+    decision is made on evidence rather than rediscovered as a bug.
+    """
+    from app.retrieval import ToolMemory
+    memory = ToolMemory()
+    memory.add(1, "python_tool", {}, "[Stdout]:\ncount 500\nmean 4.61\nstd 3.02")
+    assert memory.search("standard deviation of the data") == []
+    assert memory.search("std")                      # the printed name works
+
+
+def test_the_store_forgets_its_oldest_first():
+    from app.retrieval import ToolMemory
+    memory = ToolMemory(max_records=5)
+    for turn in range(10):
+        memory.add(turn, "python_tool", {}, f"result marker_{turn}")
+    assert len(memory) == 5
+    assert memory.search("marker_0") == []
+    assert memory.search("marker_9")
+
+
+# ── targeted file search ──────────────────────────────────────────────────────
+
+def test_find_in_file_marks_the_matching_line(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "import os\nx = 1\nprint(x)\ny = 2\n")
+    out = session._find_in_file("a.py", "print", context=1)
+    assert ">    3| print(x)" in out
+    assert "2| x = 1" in out          # context either side
+
+
+def test_find_in_file_takes_plain_text_not_only_regex(tmp_path):
+    """A model searching for `df.groupby(` is writing text, not a pattern."""
+    session = _session([], tmp_path)
+    session._write_file("a.py", "out = df.groupby('k').sum()\n")
+    assert "groupby" in session._find_in_file("a.py", "df.groupby(")
+
+
+def test_find_in_file_reports_no_match_usefully(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "x = 1\n")
+    out = session._find_in_file("a.py", "zzz")
+    assert "no match" in out
+    assert "2 lines" in out           # tells it how much file there is
+
+
+# ── error lookup ──────────────────────────────────────────────────────────────
+
+def test_debug_query_strips_this_machines_paths(tmp_path):
+    """A traceback pasted verbatim carries local paths and line numbers, matches
+    nothing, and the model concludes nobody has hit the problem before."""
+    import re
+    session = _session([], tmp_path)
+    traceback = (
+        'Traceback (most recent call last):\n'
+        '  File "C:\\Users\\me\\AppData\\Local\\Temp\\x\\script.py", line 27, in <module>\n'
+        '    for nxt in neighbors(grid, (ny, nx), w, h):\n'
+        "UnboundLocalError: cannot access local variable 'ny'")
+    lines = [ln.strip() for ln in traceback.split("\n") if ln.strip()]
+    subject = next(ln for ln in reversed(lines)
+                   if re.match(r"^[A-Za-z_.]*(Error|Exception|Warning)\b", ln))
+    for pattern, replacement in session._ERROR_NOISE:
+        subject = pattern.sub(replacement, subject)
+
+    assert "UnboundLocalError" in subject
+    assert "C:\\Users" not in subject
+    assert "line 27" not in subject
+
+
+def test_debug_tool_needs_an_error(tmp_path):
+    session = _session([], tmp_path)
+    assert "needs an error" in session._debug_tool(error="  ")
+
+
 # ── grounding: figures must come from a tool ──────────────────────────────────
 
 def test_a_computed_turn_can_still_fabricate(tmp_path):

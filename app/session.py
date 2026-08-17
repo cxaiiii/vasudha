@@ -174,6 +174,55 @@ def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "find_in_file",
+                "description": (
+                    "Search a workspace file and get back the matching lines with "
+                    "their line numbers and surrounding context. Use this BEFORE "
+                    "edit_file to locate exactly what to change, and after a "
+                    "traceback to see the line it named. Far cheaper than reading a "
+                    "whole file, and it gives you the verbatim text to use as an "
+                    "edit anchor."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File to search."},
+                        "pattern": {"type": "string",
+                                    "description": "Text or regular expression to find, "
+                                                   "e.g. a variable name or 'def solve'."},
+                        "context": {"type": "integer",
+                                    "description": "Lines of context each side. Default 3."},
+                    },
+                    "required": ["path", "pattern"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "debug_tool",
+                "description": (
+                    "Look up an error message that others have hit before. Paste the "
+                    "exception line and this searches developer sites (Stack Overflow, "
+                    "GitHub issues, the docs) with the machine-specific parts — your "
+                    "file paths, line numbers, memory addresses — stripped out, which "
+                    "is what makes the search actually match. Use it when a traceback "
+                    "is unfamiliar, not for one you already understand."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "error": {"type": "string",
+                                  "description": "The error or traceback, pasted as-is."},
+                        "context": {"type": "string",
+                                    "description": "Optional: the library or thing you "
+                                                   "are doing, e.g. 'numpy integration'."},
+                    },
+                    "required": ["error"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "remember_tool",
                 "description": (
                     "Write a lesson into your memory book, which you are shown at "
@@ -424,6 +473,12 @@ class ChatSession:
         self._file_tools = None
         self._installer = None
         self._shell = None
+        #: Every tool result of this conversation, kept whole and
+        #: searchable. Compaction removes text from the prompt; this
+        #: is where it goes instead of nowhere.
+        from app.retrieval import ToolMemory
+        self.tool_memory = ToolMemory()
+        self._turn_no = 0
         #: Files the user attached this session, as {name, path, size,
         #: description}. Only the description ever reaches the prompt.
         self.attachments: list[dict] = []
@@ -450,6 +505,8 @@ class ChatSession:
             "pip_tool": self._pip_tool,
             "shell_tool": self._shell_tool,
             "remember_tool": self._remember_tool,
+            "find_in_file": self._find_in_file,
+            "debug_tool": self._debug_tool,
             "write_file": self._write_file,
             "read_file": self._read_file,
             "list_files": self._list_files,
@@ -555,6 +612,96 @@ class ChatSession:
                 continue
             self.new_images.append(str(path))
         return result
+
+    def _find_in_file(self, path: str = "", pattern: str = "",
+                      context: int = 3, **_: object) -> str:
+        """Locate text in a file and return it with line numbers.
+
+        The point is to make an edit anchor obtainable without reading the whole
+        file. The reported loop had the model patching from memory because a
+        failed edit told it nothing about the source; this lets it ask a narrow
+        question and get verbatim text back to copy.
+        """
+        raw = self._files().read_file(path)
+        if raw.startswith("["):
+            return raw
+        if not pattern:
+            return "[error] find_in_file needs a pattern"
+
+        try:
+            matcher = re.compile(pattern)
+        except re.error:
+            # A model searching for `df.groupby(` is writing text, not a regex.
+            matcher = re.compile(re.escape(pattern))
+
+        lines = raw.split("\n")
+        hits = [i for i, line in enumerate(lines) if matcher.search(line)]
+        if not hits:
+            return (f"[no match for {pattern!r} in {path}. The file has "
+                    f"{len(lines)} lines — try a shorter or different pattern.]")
+
+        window = max(int(context or 3), 0)
+        shown: list[str] = []
+        last_end = -1
+        for index in hits[:20]:
+            start, end = max(0, index - window), min(len(lines), index + window + 1)
+            if start > last_end + 1 and shown:
+                shown.append("   ⋮")
+            for i in range(max(start, last_end + 1), end):
+                marker = ">" if i == index else " "
+                shown.append(f"{marker}{i + 1:>5}| {lines[i]}")
+            last_end = end - 1
+
+        more = f"\n[{len(hits) - 20} more matches not shown]" if len(hits) > 20 else ""
+        return (f"[{len(hits)} match(es) for {pattern!r} in {path}; "
+                f"'>' marks the matching line]\n" + "\n".join(shown) + more)
+
+    #: Stripped from an error before searching. A path, a line number or a
+    #: memory address is unique to this machine and is exactly what stops a
+    #: search matching anyone else's report of the same problem.
+    _ERROR_NOISE = (
+        (re.compile(r'File "[^"]+", line \d+(?:, in \S+)?'), ""),
+        (re.compile(r"0x[0-9a-fA-F]+"), ""),
+        (re.compile(r"[A-Za-z]:\\[^\s'\"]+"), ""),
+        (re.compile(r"/(?:home|users|tmp|var)/[^\s'\"]+", re.I), ""),
+        (re.compile(r"\bline \d+\b"), ""),
+        (re.compile(r"\s+"), " "),
+    )
+
+    def _debug_tool(self, error: str = "", context: str = "", **_: object) -> str:
+        """Search developer sites for an error, with the local noise removed.
+
+        Not a scraper: this is search_tool with a query built properly. The
+        reason it needs its own tool is that the query is the hard part — a
+        traceback pasted verbatim contains this machine's paths and line
+        numbers, matches nothing, and the model concludes nobody has hit the
+        problem before.
+        """
+        if not error.strip():
+            return "[error] debug_tool needs an error message"
+
+        # The last non-empty line of a traceback is the exception itself, which
+        # is the part worth searching; everything above it is this run's stack.
+        lines = [ln.strip() for ln in error.strip().split("\n") if ln.strip()]
+        subject = next((ln for ln in reversed(lines)
+                        if re.match(r"^[A-Za-z_.]*(Error|Exception|Warning)\b", ln)),
+                       lines[-1])
+        for pattern, replacement in self._ERROR_NOISE:
+            subject = pattern.sub(replacement, subject)
+        subject = subject.strip(" :")[:180]
+
+        query = " ".join(filter(None, [subject, context.strip()]))
+        results = self._searcher.search(f"{query} site:stackoverflow.com OR site:github.com")
+        self._searches.append(query)
+
+        if results.startswith("[No results") or results.startswith("[Search failed"):
+            # The site filter is worth one retry without it: an error from a
+            # small library may only be discussed in its own docs.
+            results = self._searcher.search(query)
+
+        return (f"[searched for: {query!r}]\n\n{results}\n\n"
+                "These are snippets. If one looks like your problem, open it with "
+                "fetch_tool before acting on it.")
 
     def _remember_tool(self, topic: str = "", lesson: str = "",
                        source: str = "", **_: object) -> str:
@@ -1076,6 +1223,7 @@ class ChatSession:
 
         # Provenance is per-turn: what was read answering the last question
         # says nothing about this one.
+        self._turn_no += 1
         self._searches, self._fetches = [], []
         self._unsourced_line = ""
         self.last_document = None
@@ -1088,6 +1236,10 @@ class ChatSession:
         if self.memory is not None:
             system += self.memory.as_prompt_section()
         system += self._attachment_section()
+        # Retrieved against the question, and excluding this turn,
+        # which has produced nothing yet.
+        system += self.tool_memory.recall_block(
+            text, exclude_turns={self._turn_no})
         convo = [{"role": "system", "content": system}] + list(self.history)
 
         turn_started = time.time()
@@ -1206,6 +1358,8 @@ class ChatSession:
                 last_tool_result = result
                 turn_tools.append({"name": call.name, "args": call.args,
                                    "result": result})
+                self.tool_memory.add(self._turn_no, call.name,
+                                     call.args, result)
                 yield {"kind": "tool_result", "name": call.name,
                        "result": result, "id": call.id}
 
