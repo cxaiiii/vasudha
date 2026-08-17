@@ -110,6 +110,13 @@ class Settings:
     # The only request this app makes that the user did not ask for. A
     # plain GET of the public releases API, carrying no identifier and no
     # version, once a day. Off means no request at all.
+    #: Largest context measured to actually load, keyed by
+    #: "<model path>|<gpu>". Measured rather than estimated: the
+    #: arithmetic was 4x too conservative on a real machine, refusing
+    #: 32k on a card that loads it. Probed once in the background and
+    #: reused, since the answer only changes with the model or the card.
+    probed_contexts: dict = field(default_factory=dict)
+
     check_updates: bool = True
     last_update_check: float = 0.0
 

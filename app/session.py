@@ -42,29 +42,39 @@ MAX_TOOL_RESULT_CHARS = 6000
 
 #: The rules a persona must never be able to soften. personas.build_system_prompt
 #: appends this AFTER the voice guidance for exactly that reason.
+#: Rules that always apply, whatever tools a turn is offered. Kept short
+#: because it is paid on every prompt: the sections that only matter when a
+#: particular tool group is present live in RULE_SECTIONS instead, and a turn
+#: that cannot search does not need to be told how to search.
 CORE_RULES = """Answer briefly and directly. Do not restate the question or pad the reply.
 
-NUMBERS — python_tool
-For ANY question with a numeric answer, call python_tool and take the number from its real output. Never state a computed value you did not get from the tool. Have the code print the value already converted to the unit asked for.
-Before using a standard formula, name the exact case it belongs to — the support condition, the boundary conditions, the assumptions — and check your formula is the one for THAT case, not a similar one. A coefficient recalled from a neighbouring case gives a confidently wrong answer.
+NUMBERS
+For ANY question with a numeric answer, call python_tool and use the number it printed. Never state a computed value you did not get from the tool. Before using a standard formula, name the case it belongs to — the support condition, the boundary conditions — and check it is the one for THAT case. A coefficient recalled from a neighbouring case gives a confidently wrong answer.
 
-SOURCES OUTRANK YOUR MEMORY — always
-When a tool has returned something, that is the fact. Your own recollection is not a second opinion about it. If a page says a figure and you remember a different one, the page wins and you say what the page says. If a tool result contradicts what you were about to write, discard what you were about to write. Never revise a fetched number toward the one you expected, and never fill a gap in a search result with a remembered figure without saying that is what you did.
+EVIDENCE OUTRANKS MEMORY
+A tool result is the fact; your recollection is not a second opinion about it. If a result contradicts what you were about to write, discard what you were about to write. Never revise a value toward the one you expected.
 
-FACTS — search_tool, fetch_tool
-For anything current, time-sensitive, or that you are not certain of, search before answering. Search is a process, not a lookup:
-1. Read the actual snippets. Say in one line which result contains the fact, or that none do.
-2. If a promising result's snippet does not spell the fact out, fetch_tool that URL.
-3. If still inconclusive, refine the query and search again — up to three searches.
-4. If sources disagree, say so explicitly and give both figures with their sources. Never present a contested fact as settled.
-Name your sources in the final answer. If you could not establish something, say that plainly rather than guessing.
+If a question needs no calculation and no lookup, just answer it in a sentence."""
 
-DELIVERABLES — document_tool
-If the user asks for a report, summary, comparison, table, spreadsheet or page, build it with document_tool rather than pasting it into the chat. Keep your chat reply to one or two lines saying what you made. Research it first, compute any figures with python_tool, then write the document from what you actually found — never from memory alone.
+#: Appended only when the matching tool group is offered. Each is the guidance
+#: that turned a measured failure around, and each is dead weight on a turn
+#: whose tools cannot act on it.
+RULE_SECTIONS: dict[str, str] = {
+    "web": """
+FACTS
+Search before answering anything current or uncertain. Read the actual snippets and say which one holds the fact, or that none do. If a snippet does not spell it out, fetch that URL. If sources disagree, give both figures with their sources. NEVER write "Source: ..." for a page you did not open this turn — a citation you did not earn is what makes a wrong figure look checked.""",
+    "docs": """
+DELIVERABLES
+For a report, table, comparison or spreadsheet, build it with document_tool rather than pasting it into the chat, and keep the chat reply to a line saying what you made. Research and compute first; never write it from memory alone.""",
+}
 
-If a question needs no calculation, no search and no document, just answer it in a sentence.
 
-NEVER claim you consulted a source you did not actually open with fetch_tool. Do not write "Source: ..." under a table unless you read that page this turn. A citation you did not earn is worse than none, because it is what makes a wrong figure look checked."""
+def build_system_prompt(persona_key: str, groups: set) -> str:
+    """The system prompt for a turn, carrying only the rules its tools can act on."""
+    rules = CORE_RULES + "".join(
+        body for group, body in RULE_SECTIONS.items() if group in groups)
+    return personas.build_system_prompt(persona_key, rules)
+
 
 SYSTEM_PROMPT = personas.build_system_prompt(personas.DEFAULT_PERSONA, CORE_RULES)
 
@@ -83,330 +93,247 @@ def _unit_rule(what: str) -> str:
             "you wrote to the workspace do persist — read them back with open().")
 
 
-def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
-    """Tool schemas for one session.
+#: Tools grouped by what a request needs, because offering all of them costs
+#: more than most turns can afford.
+#:
+#: Measured before this change: 14 schemas were 2,416 tokens and the system
+#: prompt another 1,175, so "hello" arrived with 36% of an 8k window already
+#: spent. Descriptions were written to encode a lesson each — the unit rule,
+#: the fresh-process warning, read-before-edit — which was right at four tools
+#: and unaffordable at fourteen. They are now terse, and the ones a turn cannot
+#: use are not sent.
+#:
+#: A group unlocks on a keyword and STAYS unlocked for the rest of the
+#: conversation. Re-deciding every turn would make a tool vanish between the
+#: turn that used it and the turn that follows up on it, and a model cannot ask
+#: for something it can no longer see.
+TOOL_GROUPS: dict[str, tuple[str, ...]] = {
+    # Always present: computation is the product, and files are how a
+    # multi-step task keeps its state.
+    "core": ("python_tool", "read_file", "write_file", "edit_file",
+             "list_files", "find_in_file"),
+    "web": ("search_tool", "fetch_tool", "browse_tool"),
+    "debug": ("debug_tool",),
+    "docs": ("document_tool",),
+    "system": ("pip_tool", "shell_tool"),
+    "memory": ("remember_tool",),
+}
 
-    browse_tool is dropped when Playwright is not installed rather than left in
-    to fail: an unusable schema costs ~200 tokens of every prompt and invites
-    the model to spend a turn discovering it does not work.
+#: What turns a group on. Deliberately generous — a missing tool costs a whole
+#: turn, an extra one costs a hundred tokens.
+_GROUP_TRIGGERS: dict[str, tuple[str, ...]] = {
+    # No bare question forms. "what is the" appears in every arithmetic
+    # question ever asked and pulled the whole web group into a cantilever
+    # calculation — 350 tokens for three tools the turn could not use.
+    "web": ("search", "google", "look up", "lookup", "web", "online", "internet",
+            "url", "http", "website", "news", "latest", "current price",
+            "documentation", "release notes", "browse", "wikipedia",
+            "who won", "today", "this year", "recently"),
+    "debug": ("error", "traceback", "exception", "failed", "failing", "bug",
+              "crash", "stack trace", "why does", "not working", "broken",
+              "debug", "nameerror", "typeerror", "valueerror"),
+    "docs": ("report", "document", "summary", "summarise", "summarize", "write up",
+             "writeup", "table", "spreadsheet", "csv", "comparison", "deck",
+             "memo", "draft"),
+    "system": ("install", "pip", "package", "library", "dependency", "import",
+               "module", "shell", "command", "terminal", "run the", "npm",
+               "requirements"),
+    "memory": ("remember", "note that", "keep in mind", "for next time",
+               "don't forget", "learn"),
+}
+
+
+def groups_for(text: str, unlocked: Optional[set] = None) -> set:
+    """Which tool groups a conversation has earned so far."""
+    active = set(unlocked or ()) | {"core"}
+    lowered = (text or "").lower()
+    for group, triggers in _GROUP_TRIGGERS.items():
+        if any(trigger in lowered for trigger in triggers):
+            active.add(group)
+    return active
+
+
+def _all_schemas() -> dict[str, dict]:
+    """Every tool, keyed by name. Descriptions carry the rule and nothing else.
+
+    Each one still says the thing that was learned the hard way — print the
+    converted unit, each run is a fresh process, read before you edit — because
+    those were bought with real failures. What has gone is the explanation
+    around them.
+    """
+    return {name: {"type": "function", "function": schema} for name, schema in {
+        "python_tool": {
+            "name": "python_tool",
+            "description":
+                "Run Python and use its real output. Required for ANY numeric answer — "
+                "never state a number you did not get from here. Print the value "
+                "already converted to the unit asked for. Each call is a FRESH "
+                "process: no variables or imports carry over, so every script must "
+                "stand alone. Files in the workspace do persist.",
+            "parameters": {"type": "object", "properties": {
+                "code": {"type": "string", "description": "Python source. Must print the answer."},
+            }, "required": ["code"]},
+        },
+        "search_tool": {
+            "name": "search_tool",
+            "description":
+                "Search the web; returns titles and short snippets only. If a snippet "
+                "does not actually state the fact, follow it with fetch_tool.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Search terms. Be specific."},
+            }, "required": ["query"]},
+        },
+        "fetch_tool": {
+            "name": "fetch_tool",
+            "description":
+                "Read one webpage's text. Only a URL a search result returned — never "
+                "one you recall.",
+            "parameters": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "Exact URL from a search result."},
+            }, "required": ["url"]},
+        },
+        "browse_tool": {
+            "name": "browse_tool",
+            "description":
+                "Open a page in a real browser and read it after its JavaScript runs; "
+                "click and type too. Use when fetch_tool came back empty or the page "
+                "needs interaction. Returns page text plus numbered refs to act on.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["open", "read", "click", "type", "back"]},
+                "url": {"type": "string", "description": "For action=open."},
+                "ref": {"type": "string", "description": "For click/type, e.g. 'ref3'."},
+                "text": {"type": "string", "description": "For action=type."},
+                "submit": {"type": "boolean", "description": "Press Enter after typing."},
+            }, "required": ["action"]},
+        },
+        "debug_tool": {
+            "name": "debug_tool",
+            "description":
+                "Look up an unfamiliar error. Paste the traceback; local paths and line "
+                "numbers are stripped so the search actually matches.",
+            "parameters": {"type": "object", "properties": {
+                "error": {"type": "string", "description": "The error or traceback, as-is."},
+                "context": {"type": "string", "description": "Optional: the library involved."},
+            }, "required": ["error"]},
+        },
+        "document_tool": {
+            "name": "document_tool",
+            "description":
+                "Produce a finished document in the preview canvas. Use for any report, "
+                "table or deliverable instead of pasting it into the chat.",
+            "parameters": {"type": "object", "properties": {
+                "title": {"type": "string"},
+                "format": {"type": "string", "enum": ["markdown", "html", "csv"]},
+                "content": {"type": "string", "description": "The complete body."},
+            }, "required": ["title", "format", "content"]},
+        },
+        "write_file": {
+            "name": "write_file",
+            "description": "Write a text file into the workspace. Overwrites.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Relative path, e.g. 'src/main.py'."},
+                "content": {"type": "string"},
+            }, "required": ["path", "content"]},
+        },
+        "read_file": {
+            "name": "read_file",
+            "description":
+                "Read a workspace file. Output is prefixed 'NN| ' with line numbers — "
+                "those are not part of the file, strip them before editing. Read before "
+                "you edit: an anchor written from memory usually misses on whitespace.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+            }, "required": ["path"]},
+        },
+        "list_files": {
+            "name": "list_files",
+            "description": "List the workspace.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "Subdirectory, or omit."},
+            }},
+        },
+        "find_in_file": {
+            "name": "find_in_file",
+            "description":
+                "Search a file; returns matching lines with numbers and context. Use it "
+                "to get an exact edit anchor without reading the whole file.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "pattern": {"type": "string", "description": "Text or regex."},
+                "context": {"type": "integer", "description": "Lines each side. Default 3."},
+            }, "required": ["path", "pattern"]},
+        },
+        "edit_file": {
+            "name": "edit_file",
+            "description":
+                "Replace an exact string in a file. Prefer this over rewriting a whole "
+                "file. old_text must appear EXACTLY once — include surrounding lines to "
+                "make it unique.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string", "description": "Exact text, with indentation."},
+                "new_text": {"type": "string"},
+            }, "required": ["path", "old_text", "new_text"]},
+        },
+        "pip_tool": {
+            "name": "pip_tool",
+            "description":
+                "Install Python packages so python_tool can import them. The sandbox has "
+                "the standard library and little else.",
+            "parameters": {"type": "object", "properties": {
+                "packages": {"type": "string", "description": "e.g. 'pandas numpy'."},
+            }, "required": ["packages"]},
+        },
+        "shell_tool": {
+            "name": "shell_tool",
+            "description":
+                "Run one shell command in the workspace. Not for interactive programs — "
+                "stdin is closed.",
+            "parameters": {"type": "object", "properties": {
+                "command": {"type": "string"},
+            }, "required": ["command"]},
+        },
+        "remember_tool": {
+            "name": "remember_tool",
+            "description":
+                "Save a lesson worth not rediscovering. Reusing a topic REPLACES the old "
+                "note, so correct yourself here when a source proves one wrong.",
+            "parameters": {"type": "object", "properties": {
+                "topic": {"type": "string", "description": "Short key; reusing it overwrites."},
+                "lesson": {"type": "string", "description": "One or two sentences."},
+                "source": {"type": "string", "description": "URL or tool it came from."},
+            }, "required": ["topic", "lesson"]},
+        },
+    }.items()}
+
+
+def default_schemas(include_browser: Optional[bool] = None,
+                    groups: Optional[set] = None) -> list[dict]:
+    """Schemas for one turn.
+
+    `groups` selects which sets are offered; None means all of them, which is
+    what the benchmarks and the older callers want. browse_tool is dropped when
+    Playwright is absent rather than left in to fail — an unusable schema costs
+    tokens on every prompt and invites the model to spend a turn discovering it
+    does not work.
     """
     if include_browser is None:
         from web.browser import playwright_available
         include_browser = playwright_available()
 
-    schemas = [
-        {
-            "type": "function",
-            "function": {
-                "name": "python_tool",
-                "description": _unit_rule("a numeric or algorithmic result"),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "code": {"type": "string",
-                                 "description": "Python source. Must print the final answer and its unit."},
-                    },
-                    "required": ["code"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_tool",
-                "description": (
-                    "Search the web and return real result snippets (title + short excerpt). "
-                    "Use for current events, prices, releases, anything time-sensitive, or any "
-                    "fact you are not certain of. Returns SNIPPETS ONLY — if a snippet does not "
-                    "actually state the fact you need, follow up with fetch_tool on that URL."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string",
-                                  "description": "Search terms. Be specific; refine and search "
-                                                 "again if the first pass is inconclusive."},
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "fetch_tool",
-                "description": (
-                    "Read the real text of one webpage. Only pass a URL that a search_tool "
-                    "result returned in this conversation — never invent or recall a URL."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "Exact URL from a search result."},
-                    },
-                    "required": ["url"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "document_tool",
-                "description": (
-                    "Produce a finished document and show it in the preview canvas beside the "
-                    "chat. Use this whenever the user asks for a report, summary, table, "
-                    "comparison, spreadsheet, webpage or any deliverable they will keep — do "
-                    "NOT paste a long document into the chat instead. The file is saved to the "
-                    "workspace and the user can export it."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string", "description": "Short document title."},
-                        "format": {"type": "string", "enum": ["markdown", "html", "csv"],
-                                   "description": "markdown for reports and notes; csv for "
-                                                  "spreadsheet data (first row = headers); "
-                                                  "html for a styled page or complex layout."},
-                        "content": {"type": "string",
-                                    "description": "The complete document body in that format."},
-                    },
-                    "required": ["title", "format", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "find_in_file",
-                "description": (
-                    "Search a workspace file and get back the matching lines with "
-                    "their line numbers and surrounding context. Use this BEFORE "
-                    "edit_file to locate exactly what to change, and after a "
-                    "traceback to see the line it named. Far cheaper than reading a "
-                    "whole file, and it gives you the verbatim text to use as an "
-                    "edit anchor."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File to search."},
-                        "pattern": {"type": "string",
-                                    "description": "Text or regular expression to find, "
-                                                   "e.g. a variable name or 'def solve'."},
-                        "context": {"type": "integer",
-                                    "description": "Lines of context each side. Default 3."},
-                    },
-                    "required": ["path", "pattern"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "debug_tool",
-                "description": (
-                    "Look up an error message that others have hit before. Paste the "
-                    "exception line and this searches developer sites (Stack Overflow, "
-                    "GitHub issues, the docs) with the machine-specific parts — your "
-                    "file paths, line numbers, memory addresses — stripped out, which "
-                    "is what makes the search actually match. Use it when a traceback "
-                    "is unfamiliar, not for one you already understand."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "error": {"type": "string",
-                                  "description": "The error or traceback, pasted as-is."},
-                        "context": {"type": "string",
-                                    "description": "Optional: the library or thing you "
-                                                   "are doing, e.g. 'numpy integration'."},
-                    },
-                    "required": ["error"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "remember_tool",
-                "description": (
-                    "Write a lesson into your memory book, which you are shown at "
-                    "the start of every chat. Use it when you discover something "
-                    "worth not rediscovering: a tool that behaves unexpectedly, a "
-                    "package this sandbox lacks, a fact you got wrong and then "
-                    "corrected from a source, a technique that worked. Writing the "
-                    "same topic again REPLACES the old lesson, so correct yourself "
-                    "here whenever a source proves an earlier note wrong."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {"type": "string",
-                                  "description": "Short key, e.g. 'sentiment analysis' "
-                                                 "or 'sandbox packages'. Reusing a topic "
-                                                 "overwrites it."},
-                        "lesson": {"type": "string",
-                                   "description": "One or two sentences, written to be "
-                                                  "useful to yourself later."},
-                        "source": {"type": "string",
-                                   "description": "URL or tool name it came from, if any. "
-                                                  "A lesson with a source outranks one without."},
-                    },
-                    "required": ["topic", "lesson"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "pip_tool",
-                "description": (
-                    "Install Python packages so python_tool can import them. The "
-                    "sandbox has the standard library and little else, so install "
-                    "before importing anything third-party rather than guessing "
-                    "whether it is there. Installed once, available in every later "
-                    "call and every later chat."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "packages": {
-                            "type": "string",
-                            "description": "Space- or comma-separated names, "
-                                           "optionally pinned: 'textblob' or "
-                                           "'pandas numpy' or 'requests==2.31.0'.",
-                        },
-                    },
-                    "required": ["packages"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "shell_tool",
-                "description": (
-                    "Run one shell command in the workspace directory. Use for "
-                    "things the other tools do not cover — inspecting files, "
-                    "running a build or a test command, checking what is installed. "
-                    "Not for interactive programs: stdin is closed, so anything "
-                    "that waits for input is killed on timeout."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string",
-                                    "description": "The command line to run."},
-                    },
-                    "required": ["command"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browse_tool",
-                "description": (
-                    "Open a page in a real browser and read it AFTER its JavaScript "
-                    "has run, then click links and fill in fields. Use this instead of "
-                    "fetch_tool when a page needs a browser: documentation sites, "
-                    "anything interactive, search results you want to follow, or when "
-                    "fetch_tool came back empty or looked like a shell. Returns the "
-                    "page's text plus a numbered list of things you can interact with; "
-                    "pass one of those refs back to click or type."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["open", "read", "click", "type", "back"],
-                            "description": "open a url; read the current page again; "
-                                           "click a ref; type into a ref; go back.",
-                        },
-                        "url": {"type": "string", "description": "For action=open."},
-                        "ref": {"type": "string",
-                                "description": "For click/type: a ref from the last "
-                                               "digest, e.g. 'ref3'."},
-                        "text": {"type": "string", "description": "For action=type."},
-                        "submit": {"type": "boolean",
-                                   "description": "For action=type: press Enter after "
-                                                  "typing. Use for search boxes."},
-                    },
-                    "required": ["action"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": (
-                    "Write a text file into the workspace. Use for source code, "
-                    "configs and data the user asked you to build — not for reports, "
-                    "which belong in document_tool. Overwrites an existing file."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string",
-                                 "description": "Path relative to the workspace, e.g. 'src/main.py'."},
-                        "content": {"type": "string", "description": "Full file contents."},
-                    },
-                    "required": ["path", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": (
-                    "Read a text file from the workspace. Output is prefixed with "
-                    "line numbers as 'NN| ' so you can match a traceback's line "
-                    "number to the source. Those prefixes are NOT part of the file "
-                    "— strip them before passing text to edit_file or write_file. "
-                    "Read before you edit: an edit written from memory usually "
-                    "misses on whitespace and changes nothing."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Path relative to the workspace."},
-                    },
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "List what is currently in the workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string",
-                                 "description": "Subdirectory to list. Omit for the whole workspace."},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": (
-                    "Replace an exact string in a workspace file. Prefer this over "
-                    "write_file when changing part of an existing file — rewriting a "
-                    "whole file to alter one line is how details get silently dropped. "
-                    "old_text must appear EXACTLY once."),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Path relative to the workspace."},
-                        "old_text": {"type": "string",
-                                     "description": "Exact text to replace, including indentation."},
-                        "new_text": {"type": "string", "description": "Replacement text."},
-                    },
-                    "required": ["path", "old_text", "new_text"],
-                },
-            },
-        },
-    ]
+    if groups is None:
+        wanted = set(TOOL_GROUPS)
+    else:
+        wanted = set(groups) | {"core"}
 
-    if not include_browser:
-        schemas = [s for s in schemas if s["function"]["name"] != "browse_tool"]
-    return schemas
+    names: list[str] = []
+    for group in TOOL_GROUPS:
+        if group in wanted:
+            names.extend(TOOL_GROUPS[group])
+
+    everything = _all_schemas()
+    return [everything[n] for n in names
+            if n in everything and (include_browser or n != "browse_tool")]
 
 
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.M)
@@ -479,6 +406,13 @@ class ChatSession:
         from app.retrieval import ToolMemory
         self.tool_memory = ToolMemory()
         self._turn_no = 0
+        #: Tool groups this conversation has unlocked. Only grows: a tool
+        #: that vanished between the turn that used it and the turn that
+        #: follows up on it would be worse than never offering it.
+        self._groups: set = {"core"}
+        #: Persona key, so the prompt can be rebuilt per turn with only
+        #: the rule sections the offered tools can act on.
+        self.persona_key = personas.DEFAULT_PERSONA
         #: Files the user attached this session, as {name, path, size,
         #: description}. Only the description ever reaches the prompt.
         self.attachments: list[dict] = []
@@ -512,7 +446,10 @@ class ChatSession:
             "list_files": self._list_files,
             "edit_file": self._edit_file,
         }
-        self.schemas = default_schemas()
+        self.schemas = default_schemas(groups=self._groups)
+        #: False when a caller supplied its own system prompt (the
+        #: benchmarks do), in which case it is used verbatim.
+        self._use_dynamic_prompt = (system_prompt is SYSTEM_PROMPT)
         self.options: dict = {"temperature": 0.6, "top_p": 0.9,
                               "num_predict": 2048, "num_ctx": 16384}
         self.max_iterations = MAX_ITERATIONS
@@ -1265,7 +1202,11 @@ class ChatSession:
         # The memory book is appended at ask() time rather than baked into
         # system_prompt, so a lesson written during this turn is visible on the
         # next one without rebuilding the session.
-        system = self.system_prompt
+        # What this turn may use, given everything asked so far.
+        self._groups = groups_for(text, self._groups)
+        self.schemas = default_schemas(groups=self._groups)
+        system = (build_system_prompt(self.persona_key, self._groups)
+                  if self._use_dynamic_prompt else self.system_prompt)
         if self.memory is not None:
             system += self.memory.as_prompt_section()
         system += self._attachment_section()

@@ -113,6 +113,12 @@ def _find_ui_dir() -> Path:
 UI_DIR = _find_ui_dir()
 
 
+def _ctx_cache_key(model_path, gpu_device) -> str:
+    """Cache key for a measured context size. Includes the GPU choice,
+    since pinning to a different card changes the answer."""
+    return f"{model_path}|{gpu_device}"
+
+
 class Api:
     """Everything the front end may call. Method names are the JS API surface."""
 
@@ -215,7 +221,9 @@ class Api:
                 prefer=prefer,
                 n_ctx=self._settings.num_ctx,
                 n_batch=self._settings.n_batch,
-                n_threads=self._settings.n_threads)
+                n_threads=self._settings.n_threads,
+                measured_ctx=self._settings.probed_contexts.get(
+                    _ctx_cache_key(model_path, self._settings.gpu_device)))
         except Exception as exc:  # noqa: BLE001 - see below
             # Every failure to build an engine used to land the user on the
             # download screen, whatever the cause: `except RuntimeError` caught
@@ -248,6 +256,7 @@ class Api:
         self._starting = False
         threading.Thread(target=self._warm, daemon=True).start()
         threading.Thread(target=self._check_updates, daemon=True).start()
+        threading.Thread(target=self._probe_context, daemon=True).start()
 
     @staticmethod
     def _workspace_for(chat_id: str) -> Path:
@@ -272,6 +281,40 @@ class Api:
         if not self._session:
             return
         self._session.set_workspace(str(self._workspace_for(self._chat.id)))
+
+    def _probe_context(self) -> None:
+        """Measure the largest context this model really loads at, once.
+
+        In the background and in child processes, because the estimate is only
+        arithmetic and was 4x too conservative on a real machine — it refused
+        32,768 on a card that loads it. The result is cached in settings and
+        applied on the next launch, since n_ctx is fixed when the model loads
+        and cannot be raised afterwards.
+        """
+        from app import hardware
+        path = self._settings.model_path
+        if not path or not Path(path).exists():
+            return
+        key = _ctx_cache_key(path, self._settings.gpu_device)
+        if self._settings.probed_contexts.get(key):
+            return
+        gpu = LlamaCppBackend.gpu_available()
+        try:
+            best = hardware.probe_max_context(path, gpu, requested=65536)
+        except Exception:  # noqa: BLE001 - a measurement, not a requirement
+            logger.debug("context probe failed", exc_info=True)
+            return
+        if not best:
+            return
+        logger.info("measured largest working context: %s", best)
+        self._settings.probed_contexts[key] = best
+        self._settings_store.save(self._settings)
+        current = getattr(self._backend, "context_limit", 0) or 0
+        if best > current:
+            self._call_js("onEvent", {
+                "kind": "status",
+                "text": f"This machine can hold {best:,} tokens of context "
+                        f"(currently {current:,}). Restart to use it."})
 
     def _check_updates(self) -> None:
         """Ask once a day whether a newer release exists, if allowed to.

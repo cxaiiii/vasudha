@@ -976,7 +976,8 @@ def _coerce_args(raw: Any) -> dict:
 
 def select_backend(model_path: Optional[str], ollama_model_hint: str = "vasudha",
                    prefer: Optional[str] = None, n_ctx: int = 8192,
-                   n_batch: int = 1024, n_threads: int = 0) -> Backend:
+                   n_batch: int = 1024, n_threads: int = 0,
+                   measured_ctx: Optional[int] = None) -> Backend:
     """Pick the fastest backend that will actually work on this machine.
 
     Order: explicit preference, then a running ollama (GPU, ~5-10x faster in
@@ -1011,7 +1012,8 @@ def select_backend(model_path: Optional[str], ollama_model_hint: str = "vasudha"
         # cache alone and the load fails with a message about the file. The
         # header parse this needs takes ~230ms and reads no tensors.
         from app.hardware import max_context
-        effective_ctx, capped_why = max_context(model_path or "", gpu, int(n_ctx))
+        effective_ctx, capped_why = max_context(model_path or "", gpu, int(n_ctx),
+                                                measured=measured_ctx)
         if capped_why:
             logger.warning("%s", capped_why)
 

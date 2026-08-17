@@ -167,8 +167,77 @@ def system_memory_bytes() -> Optional[int]:
 
 # ── the answer ────────────────────────────────────────────────────────────────
 
+def probe_context(model_path: str, n_ctx: int, on_gpu: bool,
+                  timeout: float = 180.0) -> bool:
+    """Does this model actually load at this context size? Asked, not estimated.
+
+    In a subprocess, which is the whole point. A failed load inside this
+    process keeps its VRAM until the process exits — verified: after one failed
+    attempt at 131,072, every retry down to 4,096 also failed on a machine
+    where 16,384 loads cleanly from cold. A child process gives the memory back
+    when it dies, so the answer costs a few seconds and nothing else.
+
+    This replaces guessing. The arithmetic version subtracted a fixed compute
+    buffer and a fixed headroom from total VRAM, and both figures were
+    conservative enough to refuse sizes that work — the reason a user found
+    64k running fine after being told it would not fit.
+    """
+    import subprocess
+    import sys as _sys
+
+    script = (
+        "import sys\n"
+        "from llama_cpp import Llama\n"
+        "Llama(model_path=sys.argv[1], n_ctx=int(sys.argv[2]),\n"
+        "      n_gpu_layers=int(sys.argv[3]), n_batch=512, verbose=False)\n"
+        "print('OK')\n"
+    )
+    try:
+        result = subprocess.run(
+            [_sys.executable, "-c", script, model_path, str(n_ctx),
+             "-1" if on_gpu else "0"],
+            capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        return result.returncode == 0 and "OK" in result.stdout
+    except (OSError, subprocess.SubprocessError):
+        # Cannot probe — a frozen build has no plain interpreter to call. The
+        # caller falls back to the estimate, which is why that path is kept.
+        return False
+
+
+def probe_max_context(model_path: str, on_gpu: bool, requested: int,
+                      floor: int = 4096) -> int:
+    """The largest power-of-two context that really loads, at most `requested`.
+
+    Binary search over sizes, each in its own process. Costs a few model loads
+    the first time and is cached by the caller, because the answer only changes
+    when the model or the hardware does.
+    """
+    sizes = []
+    size = floor
+    while size <= requested:
+        sizes.append(size)
+        size *= 2
+
+    best = 0
+    low, high = 0, len(sizes) - 1
+    while low <= high:
+        mid = (low + high) // 2
+        if probe_context(model_path, sizes[mid], on_gpu):
+            best = sizes[mid]
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def cache_key(model_path: str, on_gpu: bool) -> str:
+    return f"{model_path}|{'gpu' if on_gpu else 'cpu'}"
+
+
 def max_context(model_path: str, on_gpu: bool, requested: int,
-                floor: int = 2048) -> tuple[int, str]:
+                floor: int = 2048, measured: Optional[int] = None
+                ) -> tuple[int, str]:
     """The largest context that will actually load, and why it was capped.
 
     Returns (n_ctx, reason). reason is empty when the request was granted, so a
@@ -177,6 +246,16 @@ def max_context(model_path: str, on_gpu: bool, requested: int,
     """
     if requested <= floor:
         return requested, ""
+
+    # A measured answer beats an estimated one. The estimate stays as
+    # the fallback for a frozen build, which has no plain interpreter
+    # to spawn a probe with.
+    if measured:
+        if requested <= measured:
+            return requested, ""
+        return measured, (
+            f"{requested:,} tokens of context did not load on this machine "
+            f"when measured. Running at {measured:,}, which did.")
 
     metadata = read_gguf_metadata(model_path)
     per_token = kv_bytes_per_token(metadata)

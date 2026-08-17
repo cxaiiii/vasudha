@@ -347,6 +347,76 @@ def test_edit_file_reports_a_missing_anchor(tmp_path):
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
 
 
+# ── prompt budget ─────────────────────────────────────────────────────────────
+
+def _approx_tokens(text: str) -> int:
+    return int(len(text) / 3.6)
+
+
+def test_a_greeting_does_not_pay_for_every_tool():
+    """Reported: "hello" arrived with 36% of an 8k window already spent —
+    2,988 tokens of system prompt and fourteen tool schemas, before the
+    conversation had done anything."""
+    from app.session import build_system_prompt, default_schemas, groups_for
+    import json
+
+    groups = groups_for("hello")
+    assert groups == {"core"}
+
+    schemas = default_schemas(include_browser=True, groups=groups)
+    cost = (_approx_tokens(build_system_prompt("engineer", groups))
+            + sum(_approx_tokens(json.dumps(s["function"])) for s in schemas))
+    assert cost < 1500, f"a greeting still costs {cost} tokens"
+
+
+def test_a_calculation_does_not_unlock_the_web():
+    """"what is the" appears in every arithmetic question ever asked and used
+    to drag three web tools into a cantilever problem."""
+    from app.session import groups_for
+    assert "web" not in groups_for("what is the tip deflection of a 2.5 m cantilever?")
+    assert "web" not in groups_for("compute the reynolds number for water at 2 m/s")
+
+
+@pytest.mark.parametrize("message,group", [
+    ("search for the current price of steel", "web"),
+    ("I got a NameError traceback, why?", "debug"),
+    ("write that up as a report", "docs"),
+    ("pip install pandas for me", "system"),
+    ("remember that for next time", "memory"),
+])
+def test_a_request_unlocks_what_it_needs(message, group):
+    from app.session import groups_for
+    assert group in groups_for(message)
+
+
+def test_groups_only_ever_accumulate():
+    """A tool that vanished between the turn that used it and the turn that
+    follows up on it would be worse than never offering it."""
+    from app.session import groups_for
+    after_search = groups_for("search the web for X")
+    after_followup = groups_for("now summarise that", after_search)
+    assert "web" in after_followup          # kept
+    assert "docs" in after_followup         # and gained
+
+
+def test_rules_arrive_only_with_the_tools_they_govern():
+    from app.session import build_system_prompt
+    core_only = build_system_prompt("engineer", {"core"})
+    with_web = build_system_prompt("engineer", {"core", "web"})
+    assert "Source:" not in core_only          # the citation rule
+    assert "Source:" in with_web
+    assert len(core_only) < len(with_web)
+
+
+def test_every_tool_is_reachable_through_some_group():
+    """A tool in no group can never be offered, which is a silent removal."""
+    from app.session import TOOL_GROUPS, default_schemas
+    grouped = {name for names in TOOL_GROUPS.values() for name in names}
+    everything = {s["function"]["name"]
+                  for s in default_schemas(include_browser=True, groups=None)}
+    assert everything <= grouped
+
+
 # ── update check ──────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("candidate,current,expected", [
