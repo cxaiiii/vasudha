@@ -26,6 +26,8 @@ from typing import Callable, Optional
 
 import requests
 
+from app.paths import app_data_dir
+
 logger = logging.getLogger(__name__)
 
 # Where the weights are hosted.
@@ -91,8 +93,7 @@ def _load_source_config() -> dict:
     fix a moved link. Environment variables still win over all of it.
     """
     candidates = []
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share")
-    candidates.append(Path(base) / "Vasudha" / "model_source.json")
+    candidates.append(app_data_dir() / "model_source.json")
     candidates.append(Path(sys.executable).parent / "model_source.json")
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
@@ -109,13 +110,6 @@ def _load_source_config() -> dict:
         except (json.JSONDecodeError, OSError):
             logger.warning("ignoring unreadable %s", path, exc_info=True)
     return {}
-
-
-def app_data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share")
-    path = Path(base) / "Vasudha"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 class ModelStore:

@@ -80,14 +80,86 @@ function beginAssistant() {
   return bubble;
 }
 
+/* Streaming.
+
+   Tokens land in a plain-text element as they arrive, and the finished 'text'
+   event replaces that element with properly rendered markdown. Rendering
+   markdown on every delta instead would mean re-parsing a half-written code
+   fence sixty times a second, and a fence that is not closed yet renders as
+   garbage until the closing backticks show up. */
+let streamEl = null;
+let streamText = '';
+
+function streamDelta(text) {
+  if (!text) return;
+  if (!currentAssistant) beginAssistant();
+  if (!streamEl) {
+    streamEl = document.createElement('div');
+    streamEl.className = 'streaming';
+    currentAssistant.appendChild(streamEl);
+    streamText = '';
+  }
+  streamText += text;
+  streamEl.textContent = streamText;
+  scrollDown();
+}
+
+/* Hand the streamed run over to the rendered version. Returns true if it
+   consumed the text, so the caller does not append a second copy. */
+function finishStream(finalText) {
+  if (!streamEl) return false;
+  const el = streamEl;
+  streamEl = null;
+  const body = (finalText && finalText.trim()) ? finalText : streamText;
+  streamText = '';
+  if (!body.trim()) { el.remove(); return true; }
+  el.className = '';
+  el.innerHTML = renderMarkdown(body.trim());
+  scrollDown();
+  return true;
+}
+
+/* Reasoning arrives as deltas too, but goes into the collapsible card rather
+   than the reply body. Built on first delta so a model that never emits a
+   think block does not leave an empty card behind. */
+let thinkStreamBody = null;
+
+function thinkingDelta(text) {
+  if (!text) return;
+  if (!currentAssistant) beginAssistant();
+  if (!thinkStreamBody) {
+    addThinking('​');            // zero-width: builds the card structure
+    const cards = currentAssistant.querySelectorAll('.think-card');
+    const card = cards[cards.length - 1];
+    thinkStreamBody = card.querySelector('.think-body');
+    thinkStreamBody.textContent = '';
+  }
+  thinkStreamBody.textContent += text;
+  scrollDown();
+}
+
 function addStatus(label) {
   if (!currentAssistant) beginAssistant();
   const line = document.createElement('div');
   line.className = 'status-line';
-  line.innerHTML = `<span class="spinner"></span><span>${escapeHtml(label)}</span>`;
+  line.innerHTML = `<span class="spinner"></span><span>${escapeHtml(label)}</span>` +
+                   `<span class="tool-elapsed" data-elapsed></span>`;
   currentAssistant.appendChild(line);
+  // A status line is removed rather than settled, so its timer is cleared by
+  // removeStatus — a detached node with a live interval keeps ticking for the
+  // life of the page.
+  startElapsed(line.querySelector('[data-elapsed]'));
   scrollDown();
   return line;
+}
+
+/* Every path that drops a status line goes through here, so no timer is
+   orphaned on a node that has left the document. */
+function removeStatus() {
+  if (!pendingStatus) return;
+  stopElapsed(pendingStatus.querySelector('[data-elapsed]'));
+  pendingStatus.remove();
+  pendingStatus = null;
 }
 
 function addThinking(text) {
@@ -109,33 +181,61 @@ function addThinking(text) {
 }
 
 /* A tool call is evidence, so it gets a real card: the exact code that ran and
-   the exact stdout it produced, both inspectable. Open by default for
-   python_tool — the computation IS the answer's justification. */
+   the exact stdout it produced, both inspectable.
+
+   Which tools are evidence rather than plumbing.
+
+   python_tool stays expanded because the computation IS the justification for
+   the number — that is the whole argument of this project. The others became
+   noise once there were nine tools: a file listing does not need to be open by
+   default the way a calculation does. */
+const EVIDENCE_TOOLS = ['python_tool'];
+
+const TOOL_LABELS = {
+  python_tool: 'ran Python',
+  // Named explicitly: these are what send something off the machine, so the
+  // user should see exactly what left it.
+  search_tool: 'searched the web (query sent to DuckDuckGo)',
+  fetch_tool: 'downloaded and read a page',
+  browse_tool: 'opened a page in a browser',
+  pip_tool: 'installed a package',
+  shell_tool: 'ran a shell command',
+  remember_tool: 'wrote a note to its memory book',
+  document_tool: 'built a document',
+  render_tool: 'rendered a preview',
+  write_file: 'wrote a file',
+  read_file: 'read a file',
+  edit_file: 'edited a file',
+  list_files: 'listed the workspace',
+};
+
+/* What the model asked for, in one line. browse_tool is the awkward one: its
+   meaningful argument depends on the action, and showing "open" alone tells
+   nobody anything. */
+function toolPayload(name, args) {
+  if (name === 'browse_tool') {
+    const what = args.url || args.ref || '';
+    return [args.action || 'open', what, args.text ? `"${args.text}"` : '']
+      .filter(Boolean).join('  ');
+  }
+  return args.code || args.query || args.url || args.title || args.path || '';
+}
+
 function addToolCard(name, args) {
   if (!currentAssistant) beginAssistant();
   const card = document.createElement('div');
-  const evidenceTools = ['python_tool', 'search_tool', 'fetch_tool'];
-  const expand = settings.open_tool_cards !== false && evidenceTools.includes(name);
-  card.className = 'tool-card' + (expand ? ' open' : '');
+  const expand = settings.open_tool_cards !== false && EVIDENCE_TOOLS.includes(name);
+  card.className = 'tool-card running' + (expand ? ' open' : '');
 
-  const payload = args.code || args.query || args.url || args.title || args.path || '';
-  const label = {
-    python_tool: 'ran Python',
-    // Named explicitly: this is the only tool that sends anything off the
-    // machine, so the user should see the exact query that left it.
-    search_tool: 'searched the web (query sent to DuckDuckGo)',
-    fetch_tool: 'downloaded and read a page',
-    document_tool: 'built a document',
-    render_tool: 'rendered a preview',
-    write_file: 'wrote a file',
-    read_file: 'read a file',
-    list_directory: 'listed the workspace',
-  }[name] || name;
+  const payload = toolPayload(name, args);
+  const label = TOOL_LABELS[name] || name;
 
   card.innerHTML =
     `<div class="tool-head">
+       <span class="tool-dot" aria-hidden="true"></span>
        <span class="tag">${escapeHtml(name)}</span>
-       <span>${escapeHtml(label)}</span>
+       <span class="tool-label">${escapeHtml(label)}</span>
+       <span class="tool-elapsed" data-elapsed></span>
        <span class="chev">&#9656;</span>
      </div>
      <div class="tool-body">
@@ -146,8 +246,46 @@ function addToolCard(name, args) {
   card.querySelector('.tool-head').addEventListener('click',
     () => card.classList.toggle('open'));
   currentAssistant.appendChild(card);
+  startElapsed(card.querySelector('[data-elapsed]'));
   scrollDown();
   return card;
+}
+
+/* A counting seconds display, on anything that can run long.
+
+   Browsing waits on a real page load and a research turn can run a minute. A
+   spinner that never changes is indistinguishable from a hang, and the honest
+   fix is to show that something is still happening rather than to guess at a
+   percentage nobody can compute. */
+function startElapsed(el) {
+  if (!el) return;
+  const started = Date.now();
+  const tick = () => {
+    const s = (Date.now() - started) / 1000;
+    el.textContent = s < 1 ? '' : (s < 60 ? `${s.toFixed(0)}s`
+                                          : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`);
+  };
+  tick();
+  el._timer = setInterval(tick, 500);
+}
+
+function stopElapsed(el) {
+  if (el && el._timer) { clearInterval(el._timer); el._timer = null; }
+}
+
+/* Settle a tool card. A result beginning with [error] is a failure the model
+   will now try to recover from, and showing it as a success would misrepresent
+   what the transcript actually says happened. */
+function finishToolCard(card, result) {
+  if (!card) return;
+  const text = (result || '').trim();
+  const failed = text.startsWith('[error]') || text.startsWith('[Error');
+  card.classList.remove('running');
+  card.classList.add(failed ? 'failed' : 'done');
+  stopElapsed(card.querySelector('[data-elapsed]'));
+  const out = card.querySelector('[data-out]');
+  if (out) out.textContent = text || '(no output)';
+  if (failed) card.classList.add('open');   // a failure is worth seeing unasked
 }
 
 /* ── event bus from Python ───────────────────────────────────────────── */
@@ -158,11 +296,27 @@ let pendingStatus = null;
 window.vasudha = {
   onEvent(evt) {
     switch (evt.kind) {
+      case 'token':
+        removeStatus();
+        streamDelta(evt.text);
+        break;
+
+      case 'thinking_token':
+        thinkingDelta(evt.text);
+        break;
+
       case 'thinking':
+        // Only build a card here if nothing was streamed into one already —
+        // backends that report reasoning as a separate field (ollama) send
+        // deltas, and this final event would otherwise duplicate the block.
+        if (thinkStreamBody) { thinkStreamBody = null; break; }
         addThinking(evt.text);
         break;
 
       case 'text':
+        // finishStream consumes the streamed run when there is one; only a
+        // non-streaming backend reaches the append path below.
+        if (finishStream(evt.text)) break;
         if (evt.text && evt.text.trim()) {
           if (!currentAssistant) beginAssistant();
           const p = document.createElement('div');
@@ -173,16 +327,17 @@ window.vasudha = {
         break;
 
       case 'tool_call':
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        // The prose before a tool call is finished text, not an abandoned
+        // stream: close it out before the card goes in, or the two interleave.
+        finishStream(null);
+        thinkStreamBody = null;
+        removeStatus();
         pendingTool = addToolCard(evt.name, evt.args || {});
         break;
 
       case 'tool_result': {
-        if (pendingTool) {
-          const out = pendingTool.querySelector('[data-out]');
-          if (out) out.textContent = (evt.result || '').trim() || '(no output)';
-          pendingTool = null;
-        }
+        finishToolCard(pendingTool, evt.result);
+        pendingTool = null;
         pendingStatus = addStatus('Reading the result…');
         break;
       }
@@ -201,13 +356,22 @@ window.vasudha = {
         showDocument(evt);
         break;
 
+      /* A chart is the answer, not a side effect. matplotlib writes a PNG and
+         prints nothing, so without this the model reports success and the user
+         sees no plot at all. */
+      case 'image':
+        showImage(evt.path);
+        break;
+
       case 'status':
-        if (pendingStatus) pendingStatus.remove();
+        removeStatus();
         pendingStatus = addStatus(evt.text);
         break;
 
       case 'error':
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        finishStream(null);
+        thinkStreamBody = null;
+        removeStatus();
         if (!currentAssistant) beginAssistant();
         const err = document.createElement('div');
         err.className = 'tool-out';
@@ -216,8 +380,52 @@ window.vasudha = {
         currentAssistant.appendChild(err);
         break;
 
+      /* Figures the model asserted rather than computed, which survived being
+         asked to compute them. Loud on purpose: a fabricated statistic that
+         reads as checked is worse than no answer at all. */
+      case 'ungrounded': {
+        if (!currentAssistant) beginAssistant();
+        const warn = document.createElement('div');
+        warn.className = 'ungrounded-note';
+        warn.innerHTML =
+          '<strong>Unverified figures.</strong> ' +
+          (evt.figures || []).map((f) => `<code>${escapeHtml(f)}</code>`).join(', ') +
+          ' appear in no tool output from this turn. The model was asked to ' +
+          'compute them and did not — treat them as invented until checked.';
+        currentAssistant.appendChild(warn);
+        scrollDown();
+        break;
+      }
+
+      /* What the turn cost, in the engine's own units. Quiet by design: it is
+         there when you look for it and not competing with the answer. */
+      case 'stats': {
+        if (!currentAssistant) break;
+        const line = document.createElement('div');
+        line.className = 'stats-line';
+        const bits = [];
+        if (evt.tps) bits.push(`${evt.tps} tok/s`);
+        if (evt.out_tokens) bits.push(`${evt.out_tokens.toLocaleString()} out`);
+        if (evt.context_limit) {
+          const pct = Math.round((evt.context_tokens / evt.context_limit) * 100);
+          bits.push(`context ${evt.context_tokens.toLocaleString()}/` +
+                    `${evt.context_limit.toLocaleString()} (${pct}%)`);
+        }
+        if (evt.seconds) bits.push(`${evt.seconds}s`);
+        line.textContent = bits.join('  ·  ');
+        // Warn only where it matters: near the window the next turn is the one
+        // that gets compacted, and that is worth seeing before it happens.
+        if (evt.context_limit &&
+            evt.context_tokens / evt.context_limit > 0.75) line.classList.add('tight');
+        currentAssistant.appendChild(line);
+        scrollDown();
+        break;
+      }
+
       case 'done':
-        if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+        finishStream(null);       // a turn cut short still shows what arrived
+        thinkStreamBody = null;
+        removeStatus();
         finishTurn();
         break;
     }
@@ -265,8 +473,42 @@ window.vasudha = {
     $('#dl-detail').textContent = parts.join('   ·   ');
   },
 
+  /* `show` is falsey to hide, or {error, model} describing why there is no
+     engine. An engine that failed to load is not a missing download, and
+     offering "Download model" as the fix for it sends the user to fetch 2.3 GB
+     they already have. */
   showFirstRun(show) {
-    $('#firstrun').classList.toggle('show', !!show);
+    const panel = $('#firstrun');
+    panel.classList.toggle('show', !!show);
+    if (!show) return;
+
+    const err = (typeof show === 'object' && show.error) ? show.error : '';
+    const model = (typeof show === 'object' && show.model) ? show.model : '';
+    const box = $('#dl-error');
+
+    if (err) {
+      $('#fr-title').textContent = 'Vasudha could not start its engine';
+      $('#fr-body').textContent = model
+        ? 'The model file is here, so downloading it again will not help. ' +
+          'The engine refused to load it:'
+        : 'The engine could not be started:';
+      box.innerHTML = `<b>${escapeHtml(err)}</b>` +
+        (model ? `\n\n${escapeHtml(model)}` : '') +
+        '\n\nTry a different model file, or lower the context size in Settings ' +
+        'if this machine is short on memory.';
+      box.classList.add('show');
+      // Relabelled, because the primary action is no longer the useful one.
+      $('#dl-start').textContent = 'Download a fresh copy anyway';
+      $('#dl-locate').textContent = 'Choose a different file';
+    } else {
+      $('#fr-title').textContent = 'Set up Vasudha';
+      $('#fr-body').textContent =
+        'Vasudha needs its model file once. It is about 2.3 GB and is stored on ' +
+        'this machine — after this, the app works with no internet at all.';
+      box.classList.remove('show');
+      $('#dl-start').textContent = 'Download model';
+      $('#dl-locate').textContent = 'I already have the file';
+    }
   },
 
   onDownloadError(payload) {
@@ -327,7 +569,7 @@ window.vasudha = {
       }
     });
 
-    if (pendingStatus) { pendingStatus.remove(); pendingStatus = null; }
+    removeStatus();
     finishTurn();
     scrollDown(true);
   },
@@ -596,6 +838,31 @@ function sanitizeHtml(html) {
   return doc.body.innerHTML;
 }
 
+/* Show a generated image in the canvas.
+
+   Fetched as a data: URI over the bridge rather than an <img src="file://">:
+   the page is served from pywebview's own root, so a file:// reference to the
+   workspace is cross-origin and silently renders nothing. */
+async function showImage(path) {
+  let dataUrl = '';
+  try {
+    dataUrl = await window.pywebview.api.image_data_url(path);
+  } catch (e) {
+    dataUrl = '';
+  }
+  if (!dataUrl) return;
+
+  const name = String(path).split(/[\\/]/).pop();
+  showDocument({
+    title: name,
+    format: 'image',
+    filename: name,
+    path: path,
+    content: dataUrl,
+    sourced: true,           // it was produced here, not recalled
+  });
+}
+
 function showDocument(doc) {
   currentDoc = doc;
   const shell = $('#shell');
@@ -606,11 +873,28 @@ function showDocument(doc) {
   // model said about its sources.
   $('#canvas-warning').classList.toggle('show', doc.sourced === false);
 
-  $('#canvas-title').textContent = doc.title || 'Document';
-  $('#canvas-kind').textContent = { markdown: 'DOC', csv: 'SHEET', html: 'PAGE' }[doc.format] || 'DOC';
-  $('#canvas-source').querySelector('code').textContent = doc.content || '';
+  /* The address strip shows where this actually came from. For a document the
+     model wrote that is the file it was saved to; a bare title would look like
+     a URL slot with nothing in it. */
+  const kindEl = $('#canvas-kind');
+  kindEl.textContent = { markdown: 'DOC', csv: 'SHEET', html: 'PAGE',
+                         image: 'PLOT' }[doc.format] || 'DOC';
+  kindEl.classList.toggle('web', doc.format === 'web');
+  $('#canvas-title').textContent = doc.path || doc.filename || doc.title || 'Document';
+  $('#canvas-title').title = doc.path || doc.title || '';
+  // An image's "source" is a megabyte of base64, which helps nobody. Show the
+  // path it was written to instead.
+  $('#canvas-source').querySelector('code').textContent =
+    doc.format === 'image' ? (doc.path || doc.filename || '') : (doc.content || '');
 
-  if (doc.format === 'csv') {
+  if (doc.format === 'image') {
+    render.innerHTML = '';
+    const img = document.createElement('img');
+    img.className = 'canvas-image';
+    img.src = doc.content || '';
+    img.alt = doc.title || 'generated image';
+    render.appendChild(img);
+  } else if (doc.format === 'csv') {
     render.innerHTML = csvToTable(doc.content || '');
   } else if (doc.format === 'html') {
     render.innerHTML = sanitizeHtml(doc.content || '');
@@ -835,7 +1119,13 @@ $('#s-clear-history').addEventListener('click', async () => {
   await window.pywebview.api.clear_history();
 });
 
-window.vasudha.onSettings = paintSettings;
+window.vasudha.onSettings = (values) => {
+  paintSettings(values);
+  // The effort table is fetched rather than duplicated here, and settings
+  // arriving is the first moment the bridge is known to be up.
+  if (!effortModes) loadEffort();
+  else renderEffort(values.effort || effortModes.current);
+};
 window.vasudha.setDataPath = (p) => { $('#s-data-path').textContent = p; };
 
 /* ── First-run persona picker ────────────────────────────────────────── */
@@ -903,3 +1193,156 @@ window.addEventListener('pywebviewready', () => {
   window.pywebview.api.ready();
   input.focus();
 });
+
+/* ── Attachments ──────────────────────────────────────────────────────
+
+   The file is copied into the workspace and *described* to the model —
+   size, line count, columns, a few sample rows. Its contents never enter
+   the conversation, which is what makes attaching a 40 MB CSV reasonable
+   rather than an instant context overflow. */
+
+let attached = [];
+
+function renderAttachments() {
+  const box = $('#attachments');
+  box.innerHTML = '';
+  box.classList.toggle('show', attached.length > 0);
+  attached.forEach((file) => {
+    const chip = document.createElement('span');
+    chip.className = 'attach-chip';
+    const kb = file.size >= 1e6 ? `${(file.size / 1e6).toFixed(1)} MB`
+                                : `${Math.max(1, Math.round(file.size / 1e3))} KB`;
+    chip.innerHTML = `<span>${escapeHtml(file.name)}</span><small>${kb}</small>`;
+    box.appendChild(chip);
+  });
+}
+
+$('#attach').addEventListener('click', async () => {
+  try {
+    const result = await window.pywebview.api.attach_file();
+    if (result && result.ok) {
+      result.attached.forEach((f) => {
+        attached = attached.filter((a) => a.name !== f.name);
+        attached.push(f);
+      });
+      renderAttachments();
+    } else if (result && result.error) {
+      window.vasudha.onEvent({ kind: 'error', text: result.error });
+    }
+  } catch (e) {
+    window.vasudha.onEvent({ kind: 'error', text: String(e) });
+  }
+});
+
+/* ── Effort modes ─────────────────────────────────────────────────────
+
+   One control for the four bounds that decide what a turn can do. The table
+   lives in Python (app/settings.EFFORT_MODES) and is fetched, so there is no
+   second copy here to drift out of step with it. */
+
+let effortModes = null;
+
+function renderEffort(current) {
+  const box = $('#effort');
+  if (!effortModes) return;
+  box.innerHTML = '';
+  effortModes.order.forEach((name) => {
+    const mode = effortModes.modes[name];
+    const btn = document.createElement('button');
+    btn.className = 'effort-seg' + (name === current ? ' on' : '') +
+                    (name === 'yolo' ? ' yolo' : '');
+    btn.textContent = mode.label;
+    btn.setAttribute('role', 'radio');
+    btn.setAttribute('aria-checked', String(name === current));
+    btn.title = mode.blurb;
+    btn.addEventListener('click', () => { setEffort(name); collapseEffort(); });
+    box.appendChild(btn);
+  });
+  const mode = effortModes.modes[current];
+  $('#effort-current').textContent = mode ? mode.label : '';
+  $('#effort-toggle').title = mode ? mode.blurb : 'How hard to try';
+  $('#effort-toggle').classList.toggle('yolo', current === 'yolo');
+  document.body.classList.toggle('yolo-mode', current === 'yolo');
+}
+
+/* Collapsed by default. Expanded it is a five-segment control, which is too
+   much furniture to leave sitting above the text box permanently. */
+function expandEffort() {
+  $('#effort-wrap').classList.add('open');
+  $('#effort-toggle').setAttribute('aria-expanded', 'true');
+}
+function collapseEffort() {
+  $('#effort-wrap').classList.remove('open');
+  $('#effort-toggle').setAttribute('aria-expanded', 'false');
+}
+
+$('#effort-toggle').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const wrap = $('#effort-wrap');
+  wrap.classList.contains('open') ? collapseEffort() : expandEffort();
+});
+document.addEventListener('click', (e) => {
+  if (!$('#effort-wrap').contains(e.target)) collapseEffort();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') collapseEffort();
+});
+
+async function setEffort(name) {
+  try {
+    const result = await window.pywebview.api.set_effort(name);
+    effortModes.current = result.effort;
+    renderEffort(result.effort);
+    /* The context window is fixed when the model loads, so a mode that raises
+       it cannot apply until the next launch. Saying so beats running at a
+       window the user did not choose — this app already shipped that bug. */
+    if (result.context_pending) {
+      window.vasudha.onEvent({
+        kind: 'status',
+        text: `Context stays at ${result.loaded_ctx.toLocaleString()} tokens until ` +
+              `you restart (this mode asks for ${result.num_ctx.toLocaleString()}, ` +
+              `and it may be capped to what your hardware holds).`,
+      });
+    }
+  } catch (e) {
+    window.vasudha.onEvent({ kind: 'error', text: String(e) });
+  }
+}
+
+async function loadEffort() {
+  try {
+    effortModes = await window.pywebview.api.effort_modes();
+    renderEffort(effortModes.current);
+  } catch (e) { /* bridge not up yet; settings load will retry */ }
+}
+
+/* ── Update notice ────────────────────────────────────────────────────
+
+   A line in the chat, not a modal. The app is usable without updating and an
+   interruption would be out of proportion — and it links out to the release
+   rather than downloading anything, because Vasudha does not replace its own
+   executable. */
+
+window.vasudha.onUpdate = (info) => {
+  if (!info || !info.version) return;
+  clearEmptyState();
+  const row = document.createElement('div');
+  row.className = 'msg assistant';
+  row.innerHTML =
+    `<div class="bubble update-note">
+       <strong>Vasudha ${escapeHtml(info.version)} is available.</strong>
+       ${info.summary ? `<div class="update-summary">${escapeHtml(info.summary)}</div>` : ''}
+       <div class="update-actions">
+         <button class="btn-primary" data-open>Open the release page</button>
+         <button class="btn-ghost" data-dismiss>Not now</button>
+       </div>
+       <div class="update-foot">Checked once a day against GitHub. Turn it off
+         in Settings — nothing about this machine is sent either way.</div>
+     </div>`;
+  row.querySelector('[data-open]').addEventListener('click', () => {
+    window.pywebview.api.open_release_page(info.url || '');
+  });
+  row.querySelector('[data-dismiss]').addEventListener('click', () => row.remove());
+  threadInner.appendChild(row);
+  scrollDown(true);
+};

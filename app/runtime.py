@@ -26,6 +26,12 @@ import sys
 #: Argument that turns the frozen executable into a plain script runner.
 RUN_SCRIPT_FLAG = "--vasudha-exec-script"
 
+#: The same trick for `python -m module`, which is what pip needs. Without it
+#: the shipped build could not install packages at all, and pip_tool had to
+#: tell the user so — the sandbox has the standard library and little else, and
+#: a model that reaches for pandas has no way to get it.
+RUN_MODULE_FLAG = "--vasudha-exec-module"
+
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -36,6 +42,13 @@ def interpreter_argv() -> list[str]:
     if is_frozen():
         return [sys.executable, RUN_SCRIPT_FLAG]
     return [sys.executable]
+
+
+def module_argv() -> list[str]:
+    """Command prefix equivalent to `python -m`, frozen or not."""
+    if is_frozen():
+        return [sys.executable, RUN_MODULE_FLAG]
+    return [sys.executable, "-m"]
 
 
 def _bind_std_streams() -> None:
@@ -69,6 +82,70 @@ def _bind_std_streams() -> None:
             pass
 
 
+def clear_mark_of_the_web() -> None:
+    """Strip the "downloaded from the internet" flag from the bundle's own files.
+
+    Windows Explorer stamps every file it extracts from a downloaded .zip with a
+    Zone.Identifier alternate data stream (ZoneId=3). The .NET Framework then
+    refuses to resolve entry points in a managed assembly carrying that stream,
+    so pywebview's WinForms/EdgeChromium backend dies during import with:
+
+        RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+        from ...\\pythonnet\\runtime\\Python.Runtime.dll
+
+    which is a crash on launch, before any window appears, for every user who
+    unzips the release the ordinary way. Measured on a real download of the CI
+    artefact: 306 of the bundle's files were flagged. 7-Zip does not propagate
+    the zone, which is exactly why this survives testing on a developer machine
+    that has 7-Zip installed and a local build that was never zipped at all.
+
+    Removing an ADS is deleting the "file:stream" path. Cheap — it touches no
+    file contents and rewrites nothing — so it runs unconditionally on a frozen
+    Windows build rather than trying to detect the failure first.
+
+    The real fix is an Authenticode signature, which exempts the binary from
+    this entirely. Until there is a certificate to sign with, this is the
+    difference between an app that starts and one that does not.
+    """
+    if not is_frozen() or sys.platform != "win32":
+        return
+    root = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    for directory, _subdirs, files in os.walk(root):
+        for name in files:
+            try:
+                os.remove(os.path.join(directory, name) + ":Zone.Identifier")
+            except OSError:
+                # Not flagged, already gone, or locked — all normal. This is a
+                # best-effort repair and must never keep the app from starting.
+                pass
+    # The executable itself sits beside _internal, outside _MEIPASS.
+    try:
+        os.remove(sys.executable + ":Zone.Identifier")
+    except OSError:
+        pass
+
+
+def _add_bundled_packages() -> None:
+    """Put the shipped pip on sys.path, ahead of the frozen archive.
+
+    pip cannot be frozen. It vendors distlib, and distlib resolves its own
+    resources through a finder registry that knows about real directories and
+    zipimports but not PyInstaller's loader — so a frozen pip dies with
+    "DistlibException: Unable to locate finder for 'pip._vendor.distlib'"
+    partway through an install. Verified by building it that way.
+
+    Shipped instead as an ordinary directory tree beside the executable, which
+    is the layout distlib expects, so it simply works. Prepended rather than
+    appended so it wins over anything the archive might also provide.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    bundled = os.path.join(meipass, "pip_runtime")
+    if os.path.isdir(bundled) and bundled not in sys.path:
+        sys.path.insert(0, bundled)
+
+
 def maybe_run_as_interpreter() -> None:
     """Call first thing in the frozen entry point.
 
@@ -76,14 +153,23 @@ def maybe_run_as_interpreter() -> None:
     ever creating a window. Must run before any GUI import so a sandboxed
     execution never flashes a window or initialises WebView2.
     """
-    if len(sys.argv) >= 3 and sys.argv[1] == RUN_SCRIPT_FLAG:
-        script = sys.argv[2]
+    if len(sys.argv) >= 3 and sys.argv[1] in (RUN_SCRIPT_FLAG, RUN_MODULE_FLAG):
+        as_module = sys.argv[1] == RUN_MODULE_FLAG
+        target = sys.argv[2]
         _bind_std_streams()
+        if as_module:
+            _add_bundled_packages()
         # Present the script's own argv, as a real interpreter would.
-        sys.argv = [script] + sys.argv[3:]
+        sys.argv = [target] + sys.argv[3:]
         code = 0
         try:
-            runpy.run_path(script, run_name="__main__")
+            if as_module:
+                # run_module rather than import-and-call: pip's entry point is
+                # its __main__, and it reads sys.argv, so it has to believe it
+                # was started the ordinary way.
+                runpy.run_module(target, run_name="__main__", alter_sys=True)
+            else:
+                runpy.run_path(target, run_name="__main__")
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
         except BaseException:  # noqa: BLE001 - mimic an interpreter: report and exit 1

@@ -26,9 +26,14 @@ if str(_ROOT) not in sys.path:
 # Must happen before webview is imported: when the frozen executable is invoked
 # as a script runner by the sandbox, it has to behave like a plain interpreter
 # and never initialise a GUI. See app/runtime.py.
-from app.runtime import maybe_run_as_interpreter  # noqa: E402
+from app.runtime import clear_mark_of_the_web, maybe_run_as_interpreter  # noqa: E402
 
 maybe_run_as_interpreter()
+
+# Before `import webview` below, which is where a downloaded-and-unzipped build
+# crashes: .NET will not load pythonnet's assembly while Windows has it flagged
+# as internet-sourced. See clear_mark_of_the_web for the full failure.
+clear_mark_of_the_web()
 
 import json  # noqa: E402
 import logging  # noqa: E402
@@ -43,12 +48,42 @@ import webview  # noqa: E402
 from app.backends import Backend, LlamaCppBackend, OllamaBackend, select_backend  # noqa: E402
 from app.bootstrap import ModelStore, DownloadProgress, app_data_dir  # noqa: E402
 from app.history import Chat, ChatStore  # noqa: E402
+from app.memory import InteractionLog, MemoryBook  # noqa: E402
 from app import personas  # noqa: E402
 from app.session import ChatSession, CORE_RULES  # noqa: E402
 from app.settings import Settings, SettingsStore  # noqa: E402
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+def _configure_logging() -> None:
+    """Log to a file as well as the console.
+
+    A windowed build has console=False, so sys.stderr goes nowhere and every
+    traceback the app produces is lost. That is how a model failing to load
+    turned into "the app shows the download screen" with no way to find out
+    why. The file is small, capped, and the first thing to ask a user for.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        from logging.handlers import RotatingFileHandler
+        from app.paths import app_data_dir
+        handlers.append(RotatingFileHandler(
+            app_data_dir() / "vasudha.log", maxBytes=512_000, backupCount=1,
+            encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - an unwritable data dir must not stop launch
+        pass
+    # force=True because basicConfig is a no-op when the root logger already
+    # has a handler, and something in the import chain of a frozen build
+    # installs one. Without it this produced a log file of exactly zero bytes,
+    # which is worse than no log at all: it looks like the app got far enough
+    # to log and had nothing to say.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True)
+    logging.getLogger("vasudha.app").info("--- Vasudha starting ---")
+
+
+_configure_logging()
 logger = logging.getLogger("vasudha.app")
 
 def _find_ui_dir() -> Path:
@@ -78,6 +113,12 @@ def _find_ui_dir() -> Path:
 UI_DIR = _find_ui_dir()
 
 
+def _ctx_cache_key(model_path, gpu_device) -> str:
+    """Cache key for a measured context size. Includes the GPU choice,
+    since pinning to a different card changes the answer."""
+    return f"{model_path}|{gpu_device}"
+
+
 class Api:
     """Everything the front end may call. Method names are the JS API surface."""
 
@@ -88,10 +129,22 @@ class Api:
         self._chat = Chat()
         self._settings_store = SettingsStore()
         self._settings = self._settings_store.load()
+        # Shared across chats on purpose: a lesson learned in one
+        # conversation is worthless if the next one cannot see it.
+        self._memory = MemoryBook()
+        self._interactions = InteractionLog()
         self._backend: Optional[Backend] = None
         self._session: Optional[ChatSession] = None
         self._maximised = False
         self._needs_setup = False
+        #: True until prepare() has finished once. Guards ready() from
+        #: publishing a half-built state as though it were the final one.
+        self._starting = True
+        #: Why the engine would not start, when a model was present but unusable.
+        #: Empty means "no model yet", which is the only case the download
+        #: screen actually answers.
+        self._load_error = ""
+        self._failed_model = ""
         self._lock = threading.Lock()
 
     # -- plumbing ----------------------------------------------------------
@@ -122,34 +175,218 @@ class Api:
 
         Touches no JS: the main window's page has not loaded yet.
         """
+        # Release whatever is already loaded, first. prepare() is not only a
+        # startup path — locate_model and the post-download boot both re-enter
+        # it — and a llama.cpp model holds its VRAM until it is closed. Loading
+        # a second 2.7 GB model beside the first one fails on any 6 GB card, and
+        # fails with "Failed to load model from file", which reads as a corrupt
+        # download rather than as "you already have this open".
+        if self._backend is not None:
+            try:
+                self._backend.close()
+            except Exception:  # noqa: BLE001 - closing is best effort
+                logger.debug("closing the previous backend failed", exc_info=True)
+            self._backend = None
+            self._session = None
+            import gc
+            gc.collect()
+
         configured = self._settings.model_path or None
         model_path = Path(configured) if configured and Path(configured).exists() else None
         if model_path is None:
             model_path = self._store.installed_model()
 
+        # Before select_backend, which is the first thing to import llama_cpp:
+        # the ggml backends register at library load and a device filtered
+        # afterwards is already initialised.
+        from app.backends import set_gpu_device
+        set_gpu_device(self._settings.gpu_device)
+
         prefer = None if self._settings.backend == "auto" else self._settings.backend
         if not model_path and not OllamaBackend.probe(self._settings.ollama_url):
             self._needs_setup = True
+            self._starting = False
             return
 
         try:
+            # num_ctx has to reach the engine here, at construction: the
+            # built-in backend's window is fixed when the model is loaded, and
+            # passing it only in per-request options (which is all that used to
+            # happen) left it at the 8192 default while the user's setting said
+            # 16384. Nothing reported the mismatch — llama.cpp simply shifted
+            # the oldest tokens out mid-conversation.
             self._backend = select_backend(
                 str(model_path) if model_path else None,
                 ollama_model_hint=self._settings.ollama_model or "vasudha",
-                prefer=prefer)
-        except RuntimeError:
+                prefer=prefer,
+                n_ctx=self._settings.num_ctx,
+                n_batch=self._settings.n_batch,
+                n_threads=self._settings.n_threads,
+                measured_ctx=self._settings.probed_contexts.get(
+                    _ctx_cache_key(model_path, self._settings.gpu_device)))
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Every failure to build an engine used to land the user on the
+            # download screen, whatever the cause: `except RuntimeError` caught
+            # a model that would not load, and anything else (an ImportError
+            # from a missing native library, a VRAM allocation that failed)
+            # escaped prepare() entirely and left self._backend as None, which
+            # _publish reads as "no model" too.
+            #
+            # So a machine with a perfectly good 2.3 GB GGUF already on disk was
+            # told to download 2.3 GB, and downloading again could not possibly
+            # fix it. Record what actually went wrong instead; _publish decides
+            # what to show, and it now has something true to show.
+            logger.exception("could not start an engine")
             self._needs_setup = True
+            self._load_error = f"{type(exc).__name__}: {exc}"
+            self._failed_model = str(model_path) if model_path else ""
+            self._starting = False
             return
+        self._load_error = ""
+        self._failed_model = ""
 
         self._session = ChatSession(
             self._backend,
-            system_prompt=personas.build_system_prompt(self._settings.persona, CORE_RULES))
+            system_prompt=personas.build_system_prompt(self._settings.persona, CORE_RULES),
+            workspace=str(self._workspace_for(self._chat.id)),
+            memory=self._memory,
+            interaction_log=self._interactions)
         self._apply_settings()
         self._needs_setup = False
+        self._starting = False
+        threading.Thread(target=self._warm, daemon=True).start()
+        threading.Thread(target=self._check_updates, daemon=True).start()
+        threading.Thread(target=self._probe_context, daemon=True).start()
+
+    @staticmethod
+    def _workspace_for(chat_id: str) -> Path:
+        """One durable directory per chat, under the app's data folder.
+
+        The session used to be built with no workspace at all, which sent every
+        file the model wrote — and every document it produced — to a temporary
+        directory the OS is free to delete. That was survivable when documents
+        were the only output; with read_file/write_file/edit_file it means a
+        project the model builds across several turns can vanish underneath it,
+        and the user has nowhere to look for the files afterwards.
+
+        Keyed by chat id so two conversations cannot overwrite each other's
+        files, and so reopening a chat finds the work it produced.
+        """
+        path = app_data_dir() / "workspaces" / (chat_id or "default")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _rebind_workspace(self) -> None:
+        """Point the live session at the current chat's workspace."""
+        if not self._session:
+            return
+        self._session.set_workspace(str(self._workspace_for(self._chat.id)))
+
+    def _probe_context(self) -> None:
+        """Measure the largest context this model really loads at, once.
+
+        In the background and in child processes, because the estimate is only
+        arithmetic and was 4x too conservative on a real machine — it refused
+        32,768 on a card that loads it. The result is cached in settings and
+        applied on the next launch, since n_ctx is fixed when the model loads
+        and cannot be raised afterwards.
+        """
+        from app import hardware
+        path = self._settings.model_path
+        if not path or not Path(path).exists():
+            return
+        key = _ctx_cache_key(path, self._settings.gpu_device)
+        if self._settings.probed_contexts.get(key):
+            return
+        gpu = LlamaCppBackend.gpu_available()
+        try:
+            best = hardware.probe_max_context(path, gpu, requested=65536)
+        except Exception:  # noqa: BLE001 - a measurement, not a requirement
+            logger.debug("context probe failed", exc_info=True)
+            return
+        if not best:
+            return
+        logger.info("measured largest working context: %s", best)
+        self._settings.probed_contexts[key] = best
+        self._settings_store.save(self._settings)
+        current = getattr(self._backend, "context_limit", 0) or 0
+        if best > current:
+            self._call_js("onEvent", {
+                "kind": "status",
+                "text": f"This machine can hold {best:,} tokens of context "
+                        f"(currently {current:,}). Restart to use it."})
+
+    def _check_updates(self) -> None:
+        """Ask once a day whether a newer release exists, if allowed to.
+
+        On a worker thread and entirely best-effort: an update check must never
+        delay a launch or interrupt anything. It reports; it does not install.
+        """
+        if not self._settings.check_updates:
+            return
+        from app import updates
+        if not updates.due(self._settings.last_update_check):
+            return
+        try:
+            from vasudha.version import __version__ as current
+        except ImportError:
+            current = "0.0.0"
+        try:
+            found = updates.check(current)
+        except Exception:  # noqa: BLE001 - never surface a check failure
+            logger.debug("update check failed", exc_info=True)
+            return
+        self._settings.last_update_check = time.time()
+        self._settings_store.save(self._settings)
+        if found:
+            logger.info("update available: %s", found["version"])
+            self._call_js("onUpdate", found)
+
+    def open_release_page(self, url: str = "") -> None:
+        """Open the release in the user's own browser. Deliberately not a
+        download: this app does not replace its own executable."""
+        import webbrowser
+        from app import updates
+        target = url or updates.RELEASES_PAGE
+        if target.startswith("https://github.com/"):
+            webbrowser.open(target)
+
+    def _warm(self) -> None:
+        """Prefill the static prompt prefix while the user is still reading the
+        window.
+
+        Deliberately not on the splash: warming costs about as long as one
+        prefill (~37s on CPU for this prompt), and a 40-second splash to save
+        40 seconds later is not a saving. On a background thread the cost is
+        hidden entirely if the user takes that long to type, and if they do not,
+        it is the same work their question would have paid for anyway.
+
+        Takes the same lock as a turn, so a question asked mid-warm waits
+        rather than driving the same llama context from two threads.
+        """
+        if not self._session or not self._backend:
+            return
+        try:
+            with self._lock:
+                self._backend.warm(
+                    [{"role": "system", "content": self._session.system_prompt}],
+                    self._session.schemas, self._session.options)
+        except Exception:  # noqa: BLE001 - an optimisation, never a precondition
+            logger.debug("warm failed", exc_info=True)
 
     def ready(self) -> None:
         """Called from the page once it has loaded. Publishes state that
-        prepare() already worked out."""
+        prepare() already worked out — unless it has not finished yet.
+
+        The page loads when the window is *created*, not when it is shown, so
+        this fires while prepare() is still loading a 2.7 GB model behind the
+        splash. Publishing then found self._backend still None and showed the
+        first-run screen on a machine whose model was loading perfectly well —
+        and clicking "I already have the file" on that screen re-entered
+        prepare() and tried to load a second copy alongside the first.
+        """
+        if self._starting:
+            return          # _publish runs at the end of prepare() instead
         self._publish()
 
     def _boot(self) -> None:
@@ -163,7 +400,14 @@ class Api:
         self._call_js("setDataPath", str(app_data_dir()))
 
         if self._needs_setup or not self._backend:
-            self._call_js("showFirstRun", True)
+            # Two genuinely different situations, which looked identical before:
+            # there is no model, or there is one and it will not load. Only the
+            # first is fixed by downloading, so only the first gets a download
+            # screen that promises it will help.
+            self._call_js("showFirstRun", {
+                "error": self._load_error,
+                "model": self._failed_model,
+            })
             return
 
         # Persona choice comes after the engine is up: it is a preference, and
@@ -173,12 +417,25 @@ class Api:
 
         fast = isinstance(self._backend, OllamaBackend) or (
             isinstance(self._backend, LlamaCppBackend) and "GPU" in self._backend.display_name)
+        detail = ("Running on your GPU." if fast else
+                  "Running on CPU — answers take longer. Installing Ollama "
+                  "would use your graphics card instead.")
+        # A context smaller than the one in Settings has to be admitted. This
+        # app has already shipped one bug where the engine quietly ran at half
+        # the configured window and nothing said so.
+        downgraded = getattr(self._backend, "downgraded_from", None)
+        actual = getattr(self._backend, "context_limit", None)
+        if downgraded and actual:
+            # The backend explains itself in plain language when it can;
+            # the generic sentence is the fallback.
+            why = getattr(self._backend, "downgrade_reason", "")
+            detail += " " + (why or
+                             f"The {downgraded:,}-token context did not fit in "
+                             f"memory, so this chat holds {actual:,} tokens.")
         self._call_js("onBackend", {
             "label": self._backend.display_name,
             "fast": fast,
-            "detail": ("Running on your GPU." if fast else
-                       "Running on CPU — answers take longer. Installing Ollama "
-                       "would use your graphics card instead."),
+            "detail": detail,
         })
         self._call_js("showFirstRun", False)
         self._push_chat_list()
@@ -190,8 +447,20 @@ class Api:
             self._window.minimize()
 
     def close(self) -> None:
+        # Before destroying the window: a headless Chromium is a separate
+        # process and survives the one that forgot about it, leaving the user
+        # with a browser they cannot see and did not know they started.
+        self.shutdown()
         if self._window:
             self._window.destroy()
+
+    def shutdown(self) -> None:
+        """Release anything that outlives this process if left alone."""
+        if self._session:
+            try:
+                self._session.close()
+            except Exception:  # noqa: BLE001 - never block the window closing
+                logger.debug("session close failed", exc_info=True)
 
     def get_bounds(self) -> dict:
         """Current position and size, so a resize drag can be computed against
@@ -247,6 +516,31 @@ class Api:
         self._apply_settings()
         return asdict(self._settings)
 
+    def effort_modes(self) -> dict:
+        """The mode table, so the UI does not carry a second copy of it."""
+        from app.settings import EFFORT_MODES, EFFORT_ORDER
+        return {"order": EFFORT_ORDER, "modes": EFFORT_MODES,
+                "current": self._settings.effort}
+
+    def set_effort(self, name: str) -> dict:
+        """Switch mode. Everything but the context window takes effect now.
+
+        n_ctx is fixed when the model loads, so a mode that raises it cannot
+        apply until the next launch — and saying so is better than silently
+        running at a window the user did not pick, which this app has already
+        shipped once.
+        """
+        self._settings.apply_effort(name)
+        self._settings_store.save(self._settings)
+        self._apply_settings()
+
+        loaded = getattr(self._backend, "context_limit", None)
+        pending = bool(loaded and loaded != self._settings.num_ctx)
+        return {"effort": self._settings.effort,
+                "num_ctx": self._settings.num_ctx,
+                "loaded_ctx": loaded or 0,
+                "context_pending": pending}
+
     def reset_settings(self) -> dict:
         self._settings = Settings()
         self._settings_store.save(self._settings)
@@ -292,10 +586,8 @@ class Api:
 
     @staticmethod
     def _open_folder(path: Path) -> None:
-        try:
-            os.startfile(str(path))  # noqa: S606 - the user's own folder
-        except OSError:
-            logger.exception("could not open %s", path)
+        from app.paths import open_folder
+        open_folder(path)
 
     def clear_history(self) -> None:
         for row in self._chats.list_summaries(limit=10_000):
@@ -337,7 +629,19 @@ class Api:
             file_types=("GGUF model (*.gguf)", "All files (*.*)"))
         if not chosen:
             return ""
-        path = Path(chosen[0])
+        # create_file_dialog returns a tuple of paths on most pywebview
+        # backends and a bare string on some. Indexing [0] unconditionally
+        # takes the first *character* of the string form — "C" — which becomes
+        # a path that does not exist, gets written to settings and to
+        # models.json, and sends the app straight back to this screen having
+        # apparently ignored the file the user just picked. save_document
+        # already guards this; this one did not.
+        path = Path(chosen if isinstance(chosen, str) else chosen[0])
+        if not path.is_file():
+            self._call_js("onDownloadError",
+                          {"message": f"That is not a readable file: {path}"})
+            return ""
+
         self._store.adopt(path)
         self._settings.model_path = str(path)
         self._settings_store.save(self._settings)
@@ -360,10 +664,43 @@ class Api:
         with self._lock:
             self._chats.title_for(self._chat, text)
             self._chat.events.append({"kind": "user", "text": text})
+            # Each _emit is an evaluate_js round trip across the webview
+            # bridge. One per token is affordable at 6 tok/s on CPU and is not
+            # at 60 tok/s on a GPU, where the bridge, not the model, becomes
+            # the bottleneck and the text arrives in visible steps. Deltas are
+            # therefore coalesced into ~50 ms batches, which is below the
+            # threshold where streaming stops reading as continuous anyway.
+            buffered: dict[str, list[str]] = {"token": [], "thinking_token": []}
+            last_flush = time.monotonic()
+
+            def flush() -> None:
+                nonlocal last_flush
+                for kind, parts in buffered.items():
+                    if parts:
+                        self._emit({"kind": kind, "text": "".join(parts)})
+                        parts.clear()
+                last_flush = time.monotonic()
+
             try:
                 for event in self._session.ask(text):
+                    kind = event.get("kind")
+
+                    # Token deltas are for the live view only. The finished
+                    # 'text' event carries the same content, so persisting both
+                    # would store every reply twice — once as prose and once as
+                    # a few hundred one-word fragments — and replay it doubled
+                    # when the chat is reopened.
+                    if kind in ("token", "thinking_token"):
+                        buffered[kind].append(event.get("text", ""))
+                        if time.monotonic() - last_flush >= 0.05:
+                            flush()
+                        continue
+
+                    flush()   # ordering: never let a delta land after the
+                              # event that concludes it
                     self._chat.events.append(event)
                     self._emit(event)
+                flush()
             except Exception as exc:  # noqa: BLE001 - never kill the UI thread
                 logger.exception("turn failed")
                 self._emit({"kind": "error", "text": str(exc)})
@@ -389,6 +726,13 @@ class Api:
         self._chat = Chat()
         if self._session:
             self._session.reset()
+            # Drop the browser with the conversation. Carrying its cookies and
+            # logged-in sessions into an unrelated chat is a privacy leak, not
+            # a convenience.
+            self._session.close()
+        self._rebind_workspace()
+        if self._session:
+            self._session.chat_id = self._chat.id
         self._call_js("loadChat", {"events": []})
         self._push_chat_list()
 
@@ -399,8 +743,60 @@ class Api:
         self._chat = chat
         if self._session:
             self._session.history = list(chat.messages)
+        # Follow the chat: reopening a conversation should find the files it
+        # created, not the previous chat's.
+        self._rebind_workspace()
         self._call_js("loadChat", {"events": chat.events})
         self._push_chat_list()
+
+    def attach_file(self) -> dict:
+        """Let the user pick a file for the model to work on.
+
+        The file is copied into the workspace and *described* to the model —
+        size, line count, columns, a dozen sample rows. Its contents never
+        enter the conversation, which is what makes attaching a 40 MB CSV a
+        sensible thing to do rather than an instant context overflow.
+        """
+        if not self._window or not self._session:
+            return {"ok": False, "error": "no chat is open yet"}
+        chosen = self._window.create_file_dialog(webview.OPEN_DIALOG,
+                                                 allow_multiple=True)
+        if not chosen:
+            return {"ok": False, "error": ""}
+        # Same string-or-tuple guard as locate_model: some pywebview backends
+        # return a bare string, and indexing it yields one character.
+        paths = [chosen] if isinstance(chosen, str) else list(chosen)
+
+        attached, failed = [], []
+        for path in paths:
+            result = self._session.attach(path)
+            (attached if result.get("ok") else failed).append(result)
+        return {"ok": bool(attached), "attached": attached,
+                "error": "; ".join(f.get("error", "") for f in failed)}
+
+    def image_data_url(self, path: str) -> str:
+        """A picture as a data: URI.
+
+        There is no HTTP server to serve files from — that is the whole point of
+        the js_api bridge — so an image reaches the canvas as bytes or not at
+        all. Bounded because a data URI is base64 and lands in the DOM.
+        """
+        import base64
+        import mimetypes
+        try:
+            target = Path(path)
+            if target.stat().st_size > 12_000_000:
+                return ""
+            mime = mimetypes.guess_type(target.name)[0] or "image/png"
+            return (f"data:{mime};base64,"
+                    + base64.b64encode(target.read_bytes()).decode("ascii"))
+        except (OSError, ValueError):
+            logger.warning("could not read image %s", path, exc_info=True)
+            return ""
+
+    def open_workspace_folder(self) -> None:
+        """Show the user where the model's files actually are."""
+        self._open_folder(self._workspace_for(self._chat.id))
 
 
 #: Minimum time the splash stays up. Boot is often faster than this, but a
@@ -456,7 +852,16 @@ def main() -> int:
             say("Ready")
         except Exception:  # noqa: BLE001 - never strand the user on the splash
             logger.exception("boot failed")
+            api._starting = False
             say("Starting anyway…")
+
+        # ready() returns early while _starting is set, so the final state has
+        # to be published from here. Both orderings are covered: if the page
+        # loaded first its ready() was a no-op and this publishes; if it loads
+        # after, this call fails silently against a page that is not there yet
+        # and ready() publishes instead.
+        api._starting = False
+        api._publish()
 
         remaining = SPLASH_MIN_SECONDS - (time.time() - started)
         if remaining > 0:
@@ -468,7 +873,12 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             logger.debug("splash already closed", exc_info=True)
 
+    # Also on the window's own close event, since the titlebar X and the OS
+    # both bypass Api.close().
+    window.events.closing += api.shutdown
+
     webview.start(boot, debug=bool(os.environ.get("VASUDHA_DEBUG")))
+    api.shutdown()          # belt and braces: normal exit path
     return 0
 
 

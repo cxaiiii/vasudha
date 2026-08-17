@@ -39,3 +39,19 @@ safetensors>=0.4.4
 
 # ── Type hints ─────────────────────────────────────────────────────────────────
 typing-extensions>=4.12.0
+
+# ── Desktop app runtime ────────────────────────────────────────────────────────
+# jinja2 renders each GGUF's own chat template, which is what lets the harness
+# run models other than the bundled one. psutil supplies the physical-core count
+# used for n_threads — hyperthreads measurably hurt llama.cpp throughput, so the
+# distinction matters (see the table in app/backends.py).
+jinja2>=3.1.0
+psutil>=5.9.0
+
+# ── Optional: real browsing ────────────────────────────────────────────────────
+# browse_tool reads pages after their JavaScript has run, which fetch_tool
+# cannot. Optional on purpose: playwright downloads a ~150 MB browser of its
+# own, which would contradict the desktop app's "no bundled browser" property.
+# Without it the tool is simply not offered and fetch_tool remains the fallback.
+#   pip install playwright && playwright install chromium
+# playwright>=1.40.0

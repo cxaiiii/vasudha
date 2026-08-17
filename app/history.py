@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 def _chats_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share")
-    path = Path(base) / "Vasudha" / "chats"
+    from app.paths import app_data_dir
+    path = app_data_dir() / "chats"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

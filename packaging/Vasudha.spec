@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import (
+    collect_all,
     collect_data_files,
     collect_dynamic_libs,
     collect_submodules,
@@ -47,9 +48,28 @@ datas = [
 # the window silently fails to create a browser control.
 datas += collect_data_files("webview")
 
-# llama-cpp-python carries its own compiled backend.
+# llama-cpp-python carries its own compiled backend. With the Vulkan wheel that
+# is several shared libraries, not one: llama.cpp splits its GPU backends into
+# separate ggml-vulkan / ggml-cpu modules and loads them by name at runtime, so
+# collect_dynamic_libs (which walks the package directory) is what keeps them
+# together. Missing one does not fail the build — it fails at first launch, as a
+# silent fallback to CPU.
 datas += collect_data_files("llama_cpp")
 binaries = collect_dynamic_libs("llama_cpp")
+
+# pip, copied in as ORDINARY FILES rather than frozen into the archive.
+#
+# Freezing it does not work. pip vendors distlib, and distlib resolves its own
+# resources through a finder registry that understands real directories and
+# zipimports and not PyInstaller's loader, so `pip install` dies with
+#
+#     DistlibException: Unable to locate finder for 'pip._vendor.distlib'
+#
+# Verified by building it that way first. Shipped as a plain directory tree
+# that app/runtime.py puts on sys.path, pip sees the layout it expects and
+# works — including its vendored CA bundle, which it needs to verify PyPI.
+import pip as _pip_pkg
+datas += [(str(Path(_pip_pkg.__file__).parent), "pip_runtime/pip")]
 
 # --- imports ---------------------------------------------------------------
 hiddenimports = []
@@ -62,11 +82,36 @@ hiddenimports += [
     "bs4",
     "ddgs",
     "requests",
+    # jinja2 renders the GGUF's own chat template, which is what lets this app
+    # load a model other than the one it ships with. Imported by name inside
+    # app/backends.py, so PyInstaller does not see it statically.
+    "jinja2",
+    # Physical-core detection for n_threads. Optional at runtime (there is a
+    # fallback), bundled because the fallback is measurably worse.
+    "psutil",
     # Available to sandboxed python_tool runs, since a frozen build only has
     # what is bundled. Stdlib maths is the common case for this product.
     "decimal",
     "fractions",
     "statistics",
+]
+
+# Standard-library modules pip imports that nothing else in this app does, so
+# PyInstaller's analysis never sees them. Missing one is not a build error — it
+# is a ModuleNotFoundError partway through an install, which reads like a
+# broken package rather than a packaging gap. Found by building and running the
+# real thing: logging.config was the first, and there is no reason to discover
+# the rest one rebuild at a time.
+hiddenimports += [
+    "logging.config", "logging.handlers",
+    "configparser", "sysconfig", "platform", "netrc", "getpass",
+    "http.cookiejar", "http.client", "email", "email.parser",
+    "xml.etree.ElementTree", "unicodedata", "csv", "base64", "binascii",
+    "zipfile", "tarfile", "gzip", "bz2", "lzma", "shutil", "tempfile",
+    "hashlib", "ssl", "socket", "select", "queue",
+    "importlib.metadata", "importlib.resources", "pkgutil", "sqlite3",
+    "compileall", "py_compile", "filecmp", "difflib", "pprint",
+    "textwrap", "argparse", "optparse", "webbrowser", "ctypes.util",
 ]
 
 # Present for the model backend; also makes numeric work in python_tool usable.
@@ -106,7 +151,14 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-_icon = ROOT / "packaging" / "vasudha.ico"
+# Windows wants .ico, macOS wants .icns, and handing either the wrong format
+# is a hard error rather than a fallback.
+if sys.platform == "darwin":
+    _icon = ROOT / "packaging" / "vasudha.icns"
+elif sys.platform == "win32":
+    _icon = ROOT / "packaging" / "vasudha.ico"
+else:
+    _icon = ROOT / "packaging" / "nonexistent"
 
 exe = EXE(
     pyz,
@@ -146,7 +198,8 @@ coll = COLLECT(
 # runnable — it has no bundled runtime beside it — and double-clicking it fails
 # with "Failed to load Python DLL ... python314.dll". It looks exactly like the
 # real thing in Explorer, so remove it and leave only dist/Vasudha/Vasudha.exe.
-_stray = Path(DISTPATH).parent / "build" / "Vasudha" / "Vasudha.exe"
+_stray = (Path(DISTPATH).parent / "build" / "Vasudha" /
+          ("Vasudha.exe" if sys.platform == "win32" else "Vasudha"))
 try:
     if _stray.exists():
         _stray.unlink()
