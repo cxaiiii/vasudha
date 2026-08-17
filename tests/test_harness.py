@@ -329,21 +329,123 @@ def test_edit_file_refuses_an_ambiguous_match(tmp_path):
     result = session._edit_file("a.py", "x = 1", "x = 2")
     assert "appears 2 times" in result
     # Unchanged: a silent first-occurrence replacement is how a file ends up
-    # subtly wrong somewhere nobody looks.
-    assert session._read_file("a.py") == "x = 1\nx = 1\n"
+    # subtly wrong somewhere nobody looks. Checked against the raw contents,
+    # since _read_file adds line numbers for the model's benefit.
+    assert session._files().read_file("a.py") == "x = 1\nx = 1\n"
 
 
 def test_edit_file_replaces_a_unique_match(tmp_path):
     session = _session([], tmp_path)
     session._write_file("a.py", "alpha = 1\nbeta = 2\n")
     assert "one replacement" in session._edit_file("a.py", "beta = 2", "beta = 3")
-    assert session._read_file("a.py") == "alpha = 1\nbeta = 3\n"
+    assert session._files().read_file("a.py") == "alpha = 1\nbeta = 3\n"
 
 
 def test_edit_file_reports_a_missing_anchor(tmp_path):
     session = _session([], tmp_path)
     session._write_file("a.py", "alpha = 1\n")
     assert "not in" in session._edit_file("a.py", "gamma = 9", "gamma = 8")
+
+
+# ── grounding: figures must come from a tool ──────────────────────────────────
+
+def test_a_computed_turn_can_still_fabricate(tmp_path):
+    """python_tool used to be excluded from the grounding check on the theory
+    that a run computing its own numbers cannot invent any. A real session
+    disproved it: legitimate code ran, and the write-up then quoted
+    "BIC = 1234.56, AIC = 1256.78" — placeholder digits in no stdout at all.
+    """
+    session = _session([], tmp_path)
+    tools = [{"name": "python_tool", "args": {},
+              "result": "[Stdout]:\nmeans: [2.014, 7.982]\nlog-likelihood: -1043.27"}]
+    missing = session._ungrounded_figures(
+        "BIC = 1234.56 and AIC = 1256.78, means 2.014 and 7.982.", tools)
+    assert missing == ["1234.56", "1256.78"]
+
+
+def test_values_printed_by_the_run_are_not_flagged(tmp_path):
+    session = _session([], tmp_path)
+    tools = [{"name": "python_tool", "args": {},
+              "result": "[Stdout]:\nmeans: [2.014, 7.982]\nlog-likelihood: -1043.27"}]
+    assert session._ungrounded_figures(
+        "Means were 2.014 and 7.982, log-likelihood -1043.27.", tools) == []
+
+
+def test_the_repair_prompt_names_the_exact_figures(tmp_path):
+    """Told only that something is ungrounded, the model rewrites the prose
+    around the same invented number. Told which number, it computes or drops."""
+    session = _session([], tmp_path)
+    prompt = session._repair_prompt(["1234.56", "1256.78"])
+    assert "1234.56" in prompt and "1256.78" in prompt
+    assert "python_tool" in prompt
+
+
+def test_a_fabricated_figure_survives_to_the_footer(tmp_path):
+    session = _session([], tmp_path)
+    tools = [{"name": "python_tool", "args": {}, "result": "[Stdout]:\nx = 5.0"}]
+    note = session._unsourced_note("The result is 9999.99.", tools)
+    assert "9999.99" in note
+    assert "unverified" in note.lower()
+
+
+# ── grounding: a diverged run is not an answer ────────────────────────────────
+
+@pytest.mark.parametrize("output", [
+    "[Stderr]: RuntimeWarning: overflow encountered in double_scalars",
+    "[Stdout]: position: nan",
+    "[Stdout]: energy: inf",
+    "[Stderr]: RuntimeWarning: invalid value encountered in sqrt",
+])
+def test_numerical_failure_is_flagged(output):
+    """The model explains that Euler can go unstable and then fails to notice
+    that its own run just did. A spring simulation reached 1e306 and a period
+    was reported from it."""
+    from app.session import _flag_numerical_failure
+    flagged = _flag_numerical_failure(output)
+    assert "numerical failure detected" in flagged
+    assert "not usable" in flagged
+
+
+def test_a_healthy_run_is_left_alone():
+    from app.session import _flag_numerical_failure
+    clean = "[Stdout]:\nperiod: 1.2566 s\n[Finished in 0.1s]"
+    assert _flag_numerical_failure(clean) == clean
+
+
+# ── grounding: edits land on the real source ──────────────────────────────────
+
+def test_read_file_numbers_its_lines(tmp_path):
+    """A traceback says "line 27"; an unnumbered listing gives the model no way
+    to act on that."""
+    session = _session([], tmp_path)
+    session._write_file("a.py", "alpha = 1\nbeta = 2\ngamma = 3\n")
+    listing = session._read_file("a.py")
+    assert "1| alpha = 1" in listing
+    assert "2| beta = 2" in listing
+
+
+def test_a_failed_edit_shows_the_real_source(tmp_path):
+    """The observed loop: the model diagnosed the error correctly every time
+    and re-emitted the same broken line, because a bare "not found" left it
+    editing from memory. Handing back the actual text ends that."""
+    session = _session([], tmp_path)
+    session._write_file("astar.py",
+                        "def f():\n    for n in neighbors(grid, (ny, nx), w, h):\n"
+                        "        pass\n")
+    # Same intent, wrong whitespace — the classic near-miss.
+    result = session._edit_file("astar.py",
+                                "for n in neighbors(grid, (ny,nx), w, h):",
+                                "for n in neighbors(grid, current, w, h):")
+    assert "not in astar.py" in result
+    assert "closest match is line 2" in result
+    assert "(ny, nx)" in result          # the real text, to copy from
+
+
+def test_the_edit_lands_once_the_anchor_is_right(tmp_path):
+    session = _session([], tmp_path)
+    session._write_file("a.py", "x = 1\ny = 2\n")
+    assert "one replacement" in session._edit_file("a.py", "y = 2", "y = 3")
+    assert "y = 3" in session._read_file("a.py")
 
 
 # ── effort modes ──────────────────────────────────────────────────────────────
@@ -428,7 +530,9 @@ def test_read_file_refuses_a_large_file_instead_of_truncating(tmp_path):
 def test_a_small_file_is_still_read_normally(tmp_path):
     session = _session([], tmp_path)
     session._write_file("notes.txt", "a short note")
-    assert session._read_file("notes.txt") == "a short note"
+    # Numbered for display; the raw contents are still exactly what was written.
+    assert session._read_file("notes.txt") == "1| a short note"
+    assert session._files().read_file("notes.txt") == "a short note"
 
 
 def test_attaching_puts_the_file_in_the_workspace(tmp_path):

@@ -380,6 +380,23 @@ window.vasudha = {
         currentAssistant.appendChild(err);
         break;
 
+      /* Figures the model asserted rather than computed, which survived being
+         asked to compute them. Loud on purpose: a fabricated statistic that
+         reads as checked is worse than no answer at all. */
+      case 'ungrounded': {
+        if (!currentAssistant) beginAssistant();
+        const warn = document.createElement('div');
+        warn.className = 'ungrounded-note';
+        warn.innerHTML =
+          '<strong>Unverified figures.</strong> ' +
+          (evt.figures || []).map((f) => `<code>${escapeHtml(f)}</code>`).join(', ') +
+          ' appear in no tool output from this turn. The model was asked to ' +
+          'compute them and did not — treat them as invented until checked.';
+        currentAssistant.appendChild(warn);
+        scrollDown();
+        break;
+      }
+
       /* What the turn cost, in the engine's own units. Quiet by design: it is
          there when you look for it and not competing with the answer. */
       case 'stats': {

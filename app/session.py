@@ -302,7 +302,13 @@ def default_schemas(include_browser: Optional[bool] = None) -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read a text file back from the workspace.",
+                "description": (
+                    "Read a text file from the workspace. Output is prefixed with "
+                    "line numbers as 'NN| ' so you can match a traceback's line "
+                    "number to the source. Those prefixes are NOT part of the file "
+                    "— strip them before passing text to edit_file or write_file. "
+                    "Read before you edit: an edit written from memory usually "
+                    "misses on whitespace and changes nothing."),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -540,6 +546,7 @@ class ChatSession:
                   if p.suffix.lower() in IMAGE_SUFFIXES and p.is_file()}
 
         result = self._executor.execute_python(code, cwd=self._workspace)
+        result = _flag_numerical_failure(result)
 
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
@@ -668,10 +675,56 @@ class ChatSession:
         return self._files().write_file(path, content)
 
     def _read_file(self, path: str = "", **_: object) -> str:
-        return self._files().read_file(path)
+        """Read a file with line numbers.
+
+        Numbered because a traceback says "line 27" and an unnumbered listing
+        gives the model no way to act on that. The observed failure: a
+        traceback named an undefined variable, the model diagnosed it correctly
+        every time, and then re-emitted the same broken line — it never
+        established *where* the line was, so its "fix" was a rewrite from memory
+        rather than an edit to the source.
+        """
+        content = self._files().read_file(path)
+        if content.startswith("["):          # an error or a size refusal
+            return content
+        lines = content.split("\n")
+        width = len(str(len(lines)))
+        return "\n".join(f"{i:>{width}}| {line}"
+                         for i, line in enumerate(lines, 1))
 
     def _list_files(self, path: str = ".", **_: object) -> str:
         return self._files().list_directory(path or ".")
+
+    @staticmethod
+    def _nearest_context(source: str, wanted: str, window: int = 4) -> str:
+        """The real lines around the closest thing to what was asked for.
+
+        Matched on the most distinctive line of the attempted anchor rather
+        than on the whole block, because a failed edit usually has one line
+        almost right and the rest reconstructed. Falls back to the head of the
+        file, which still beats saying nothing.
+        """
+        import difflib
+
+        lines = source.split("\n")
+        probes = [ln.strip() for ln in wanted.split("\n") if ln.strip()]
+        best_index, best_score = None, 0.0
+        for probe in probes:
+            for i, line in enumerate(lines):
+                score = difflib.SequenceMatcher(None, probe, line.strip()).ratio()
+                if score > best_score:
+                    best_index, best_score = i, score
+
+        if best_index is None or best_score < 0.45:
+            head = lines[: window * 3]
+            return ("The file currently begins:\n"
+                    + "\n".join(f"{i:>4}| {ln}" for i, ln in enumerate(head, 1)))
+
+        start = max(0, best_index - window)
+        end = min(len(lines), best_index + window + 1)
+        body = "\n".join(f"{i:>4}| {lines[i - 1]}" for i in range(start + 1, end + 1))
+        return (f"The closest match is line {best_index + 1}. "
+                f"What is actually there:\n{body}")
 
     def _edit_file(self, path: str = "", old_text: str = "",
                    new_text: str = "", **_: object) -> str:
@@ -690,8 +743,15 @@ class ChatSession:
             return "[error] edit_file needs old_text; use write_file to create a file"
         occurrences = current.count(old_text)
         if occurrences == 0:
-            return (f"[error] that exact text is not in {path}. Read the file first "
-                    "and copy the target text verbatim, including indentation.")
+            # Show the source rather than only refusing. A bare "not found"
+            # leaves the model editing from its own recollection of the file,
+            # which is how the same broken line gets re-emitted three times in
+            # a row. Handing back the real text of the nearest match ends that
+            # loop: the next attempt is against what is actually on disk.
+            return (f"[error] that exact text is not in {path}.\n"
+                    + self._nearest_context(current, old_text)
+                    + "\nCopy the target text verbatim from above, including "
+                      "indentation, and try again.")
         if occurrences > 1:
             return (f"[error] that text appears {occurrences} times in {path}. "
                     "Include more surrounding lines so it matches exactly once.")
@@ -736,29 +796,54 @@ class ChatSession:
         except Exception:  # noqa: BLE001 - logging must not break a reply
             logger.debug("interaction log failed", exc_info=True)
 
-    def _unsourced_note(self, answer: str, tools: list[dict]) -> str:
-        """A line naming figures in the answer that no tool result contained.
+    #: Tools whose output is evidence a figure can be grounded in. python_tool
+    #: is the important one and used to be excluded, on the reasoning that a
+    #: run that computes its own numbers cannot invent any. It can: a real
+    #: session produced a statistical write-up quoting "BIC = 1234.56, AIC =
+    #: 1256.78" — placeholder digits that appeared in no stdout at all — after
+    #: legitimately running code. Running code is not the same as reporting
+    #: what it printed, and that gap is the failure this catches.
+    EVIDENCE_TOOLS = ("python_tool", "shell_tool", "search_tool",
+                      "fetch_tool", "browse_tool", "read_file")
 
-        The rule is that observation outranks recall, and the checkable
-        violation of it is a number that came from nowhere. Advisory, not
-        destructive: a figure can legitimately be derived from ones that are
-        present, so naming them lets a reader check rather than silently
-        deleting something correct.
-        """
-        if not tools:
-            return ""
-        # Only meaningful when the turn actually consulted the world. A pure
-        # python_tool turn produces its own numbers by definition.
-        if not any(t["name"] in ("search_tool", "fetch_tool", "browse_tool")
-                   for t in tools):
-            return ""
+    def _ungrounded_figures(self, answer: str, tools: list[dict]) -> list[str]:
+        """Figures in the answer that appear in no tool output this turn."""
+        evidence = [t["result"] for t in tools if t["name"] in self.EVIDENCE_TOOLS]
+        if not evidence:
+            return []
         from app.memory import unsourced_figures
-        missing = unsourced_figures(answer, [t["result"] for t in tools])
+        return unsourced_figures(answer, evidence)
+
+    def _repair_prompt(self, missing: list[str]) -> str:
+        """Send the model back to compute what it asserted.
+
+        Naming the exact figures matters. Told only that something is
+        ungrounded, the model rewrites the prose around the same invented
+        number; told that 1234.56 appears in no output, it either computes it
+        or drops the claim.
+        """
+        return (
+            "STOP. These figures appear in your reply but in no tool output this "
+            "turn: " + ", ".join(missing) + ".\n"
+            "You have not computed them. Either call python_tool and use the value "
+            "it prints, or delete the claim entirely. Do not restate a number you "
+            "have not calculated, and do not adjust it to look plausible.")
+
+    def _unsourced_note(self, answer: str, tools: list[dict]) -> str:
+        """The footer line for figures that survived the repair attempt.
+
+        Advisory rather than destructive: a figure can legitimately be derived
+        from ones that are present — a ratio, a rounded value, a sum — so
+        deleting them would break correct answers. Naming them lets a reader
+        check the ones that matter.
+        """
+        missing = self._ungrounded_figures(answer, tools)
         if not missing:
             return ""
-        return ("\n\n> **Not in any source read this turn:** "
+        return ("\n\n> **Not produced by any tool this turn:** "
                 + ", ".join(f"`{m}`" for m in missing)
-                + ". These came from the model's own recall — check them.")
+                + ". The model asserted these rather than computing them — "
+                "treat them as unverified.")
 
     def _provenance_block(self) -> str:
         """A footer describing what this turn ACTUALLY consulted.
@@ -1013,6 +1098,7 @@ class ChatSession:
         budget = self._budget(options)
         last_tool_result = ""
         nudged = False
+        repaired = False        # one figure-grounding retry per turn
         used_tools = False
 
         for _ in range(self.max_iterations):
@@ -1061,9 +1147,28 @@ class ChatSession:
                     self.history.append({"role": "assistant", "content": final_answer})
                     self._record_turn(text, final_answer, turn_tools, turn_started)
                 else:
+                    # Detection before acceptance. A figure the model asserted
+                    # rather than computed gets one chance to be computed —
+                    # naming it back is far more effective than a general
+                    # instruction, because the model otherwise rewrites the
+                    # prose around the same invented number.
+                    ungrounded = self._ungrounded_figures(visible, turn_tools)
+                    if ungrounded and not repaired:
+                        repaired = True
+                        yield {"kind": "status",
+                               "text": "Checking figures against tool output…"}
+                        convo.append({"role": "user",
+                                      "content": self._repair_prompt(ungrounded)})
+                        continue
+
                     final_answer = visible
                     yield self._stats_event(out_tokens, turn_started)
                     self._unsourced_line = self._unsourced_note(visible, turn_tools)
+                    if self._unsourced_line:
+                        # It survived a repair attempt, so it is not a slip.
+                        # Loud rather than footnoted: a fabricated statistic
+                        # that reads as checked is worse than no answer.
+                        yield {"kind": "ungrounded", "figures": ungrounded}
                     self._record_turn(text, final_answer, turn_tools, turn_started)
                     self.history.append({"role": "assistant", "content": visible})
                     # The model was asked to use document_tool for deliverables
@@ -1125,6 +1230,42 @@ class ChatSession:
                 self.history.append(tool_message)
 
         yield {"kind": "status", "text": "Stopped after too many tool calls."}
+
+
+#: Signs that a numerical run produced garbage rather than an answer. All of
+#: these appeared in a real session where a spring simulation diverged to 1e306
+#: and the model went on to report a period from it.
+_NUMERICAL_TROUBLE = (
+    ("overflow", "a value exceeded the floating-point range"),
+    ("invalid value", "an operation produced NaN"),
+    ("divide by zero", "a division by zero occurred"),
+    ("nan", "the output contains NaN"),
+    ("inf", "the output contains infinity"),
+)
+
+
+def _flag_numerical_failure(result: str) -> str:
+    """Make a diverged computation impossible to narrate past.
+
+    The model is good at explaining that Euler integration can go unstable and
+    poor at noticing that its own run just did. RuntimeWarnings arrive on
+    stderr next to plausible-looking numbers, and the numbers get reported. The
+    harness cannot tell whether the physics is right, but it can refuse to let
+    `inf` and `nan` slide by unremarked — which is enough to stop the model
+    building an answer on top of them.
+    """
+    haystack = result.lower()
+    hits = [why for token, why in _NUMERICAL_TROUBLE if token in haystack]
+    if not hits:
+        return result
+    # Deduplicated and capped: one clear sentence, not a wall matching every
+    # token in a long traceback.
+    unique = list(dict.fromkeys(hits))[:3]
+    return (result.rstrip() + "\n\n[numerical failure detected: "
+            + "; ".join(unique) + ". These results are not usable. Do NOT report "
+            "a value derived from this run. Fix the computation — a smaller step "
+            "size, a stable integrator, or a check on the maths — and run it "
+            "again before drawing any conclusion.]")
 
 
 def _clip_tool_result(result: str) -> str:
