@@ -188,20 +188,23 @@ class PackageInstaller:
                     "Give plain names or name==version, nothing else.")
 
         target = packages_dir()
-        argv = _interpreter_argv()
-        # A frozen build's "interpreter" is Vasudha.exe plus a run-a-script
-        # flag, which cannot take `-m pip`, and no pip is bundled anyway. Say
-        # so plainly: a mystery failure here would send the model into exactly
-        # the guessing loop this tool exists to prevent.
-        if len(argv) > 1:
-            return ("[error] this build cannot install packages — it ships a Python "
-                    "runtime without pip. Use the standard library instead: math, "
-                    "statistics, decimal, fractions, json, re and csv are available.")
+
+        # `python -m pip`, whether or not this is a frozen build. The shipped
+        # executable has no `-m`, so app/runtime.py grew a flag that runs a
+        # module through runpy — and pip itself is bundled (11 MB). Installing
+        # with --target means pip only downloads and unpacks into a directory,
+        # which is the mode least dependent on there being a real environment
+        # around it.
+        try:
+            from app.runtime import module_argv
+            argv = module_argv() + ["pip"]
+        except ImportError:
+            argv = [os.sys.executable, "-m", "pip"]
 
         try:
             started = time.time()
             process = subprocess.run(
-                argv + ["-m", "pip", "install", "--target", target,
+                argv + ["install", "--target", target,
                         "--no-input", "--disable-pip-version-check", "--quiet",
                         *names],
                 capture_output=True, text=True, timeout=self.timeout,
@@ -214,6 +217,10 @@ class PackageInstaller:
 
         if process.returncode != 0:
             detail = (process.stderr or process.stdout or "").strip()
+            if "No module named pip" in detail:
+                return ("[error] this build does not include pip, so packages cannot "
+                        "be installed. Use the standard library instead: math, "
+                        "statistics, decimal, fractions, json, re and csv.")
             return f"[error] pip install failed:\n{detail[-1500:]}"
         return (f"[installed {', '.join(names)} in {elapsed:.1f}s] "
                 "They are importable from the next python_tool call onwards.")
