@@ -368,10 +368,17 @@ def pipeline(budget: float = 25.0, skip_smoke: bool = False, opd_max_minutes: fl
                     break
                 except modal.exception.OutputExpiredError:
                     raise
-                except modal.exception.TimeoutError:
+                except (modal.exception.TimeoutError, TimeoutError):   # "not finished yet"
                     used = time.time() - started
                     print(f"[pipeline] {name}: {used / 60:.0f} min, ~${used / 3600 * rate:.2f} so far", flush=True)
         finally:
+            if not ok:
+                # Whatever stopped us (a failed stage, the cap, a bug here), a
+                # stage left running would spend money no ledger sees.
+                try:
+                    call.cancel(terminate_containers=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[pipeline] could not cancel {name}: {exc}", flush=True)
             vol.reload()
             entry = ledger.record(name, GPU if gpu else None, time.time() - started + IDLE_S, rate, ok)
             vol.commit()
