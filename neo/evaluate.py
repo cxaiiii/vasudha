@@ -19,7 +19,7 @@ from typing import Optional
 
 from neo.evalsets import FAST_SUITES, THINKING_LIMITS, THINKING_SUITES, load_suite
 from neo.rollout import RolloutEngine, expand
-from neo.verify import score_episode
+from neo.verify import score_episode_safe
 
 MODE_SETTINGS = {
     # Greedy for the fast mode (deterministic); Qwen's recommended sampling for
@@ -32,7 +32,7 @@ MODE_SETTINGS = {
 def score_all(episodes) -> list[dict]:
     out = []
     for ep in episodes:
-        s = score_episode(ep.task, ep.completion)
+        s = score_episode_safe(ep.task, ep.completion)
         out.append({"id": ep.row["id"], "source": ep.row["source"], "env": ep.row.get("environment", "text"),
                     "correct": bool(s.correct), "reward": float(s.reward), "metrics": s.metrics,
                     "tokens": ep.tokens, "thinking_tokens": ep.thinking_tokens, "turns": ep.turns,
@@ -146,7 +146,7 @@ def calibrate(model: str, rows: list[dict], k: int = 4, max_tokens: int = 1536, 
         started = time.time()
         episodes = engine.run(expand(rows, k))
         log(f"calibration rollouts: {len(episodes)} in {time.time() - started:.0f}s")
-        scores = [score_episode(ep.task, ep.completion).correct for ep in episodes]
+        scores = [score_episode_safe(ep.task, ep.completion).correct for ep in episodes]
     finally:
         pool.close()
     return [sum(scores[i * k:(i + 1) * k]) / k for i in range(len(rows))]

@@ -64,6 +64,7 @@ def test_bfcl_match_rules():
     assert bfcl_match([ParsedCall("calculate_triangle_area", {"base": 10, "height": 5, "unit": "Units"})], gold, [TRIANGLE])
     assert not bfcl_match([ParsedCall("calculate_triangle_area", {"base": 10})], gold, [TRIANGLE])
     assert not bfcl_match([ParsedCall("calculate_triangle_area", {"base": 10, "height": 5, "colour": "red"})], gold, [TRIANGLE])
+    assert not bfcl_match([ParsedCall("f", {})], None, [])           # item shipped without an answer
     par = [{"f": {"x": [1]}}, {"f": {"x": [2]}}]
     assert bfcl_match([ParsedCall("f", {"x": 2}), ParsedCall("f", {"x": 1})], par, [])
 

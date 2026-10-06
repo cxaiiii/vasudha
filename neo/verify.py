@@ -354,3 +354,19 @@ def score_episode(task: dict, messages: Sequence[dict], tools: Optional[list[Too
         score.metrics["malformed_tool_text"] = 1.0
     score.metrics.setdefault("empty_reply", 0.0)
     return score
+
+
+_score_errors = 0
+
+
+def score_episode_safe(task: dict, messages: Sequence[dict], tools: Optional[list[ToolRecord]] = None) -> EpisodeScore:
+    """score_episode for long-running loops (RL rewards, evaluation): a scorer
+    bug on one odd item scores it as wrong instead of killing a paid GPU stage."""
+    global _score_errors
+    try:
+        return score_episode(task, messages, tools)
+    except Exception as exc:  # noqa: BLE001
+        _score_errors += 1
+        if _score_errors <= 20:
+            print(f"[verify] scoring error ({task.get('type')}): {type(exc).__name__}: {exc}", flush=True)
+        return EpisodeScore(0.0, False, {"answer_correct": 0.0, "score_error": 1.0})

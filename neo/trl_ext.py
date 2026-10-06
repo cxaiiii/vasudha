@@ -18,7 +18,7 @@ from collections import defaultdict
 
 from trl import GRPOTrainer
 
-from neo.verify import ToolRecord, score_episode
+from neo.verify import ToolRecord, score_episode_safe
 
 TEXT_ENVS = frozenset({"text"})
 
@@ -47,7 +47,7 @@ def neo_reward(prompts, completions, task, environments=None, log_metric=None, *
         if env is not None and getattr(env, "calls", None) is not None and t["type"] != "fc":
             tools = [ToolRecord(c.name, c.result, c.ok) for c in env.calls]
         messages = completion if isinstance(completion, list) else [{"role": "assistant", "content": completion}]
-        s = score_episode(t, messages, tools)
+        s = score_episode_safe(t, messages, tools)
         rewards.append(float(s.reward))
         per_type[t["type"]].append(s)
     if log_metric is not None:

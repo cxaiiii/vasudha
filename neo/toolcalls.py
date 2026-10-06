@@ -298,6 +298,8 @@ def bfcl_call_ok(call: ParsedCall, gold: dict, schema_props: Optional[dict] = No
 
 def bfcl_match(calls: list[ParsedCall], ground_truth: list[dict], schemas: list[dict]) -> bool:
     """All gold calls matched one-to-one (order-insensitive), nothing extra."""
+    if ground_truth is None:            # unscorable item: never count it as correct
+        return False
     if len(calls) != len(ground_truth):
         return False
     props = {}

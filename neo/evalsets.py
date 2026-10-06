@@ -191,6 +191,8 @@ def bfcl(categories: list[str] = BFCL_CATEGORIES, seed: int = EVAL_SEED) -> list
         if cat in BFCL_LIMITS and len(items) > BFCL_LIMITS[cat]:
             items = rng.sample(items, BFCL_LIMITS[cat])
         for item in items:
+            if not cat.endswith("relevance") and answers.get(item["id"]) is None:
+                continue        # BFCL ships a few items without a possible answer
             tools = [to_openai_tool(f) for f in item["function"]]
             turn = item["question"][0]
             system = "\n".join(m["content"] for m in turn if m["role"] == "system") or None
