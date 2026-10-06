@@ -119,6 +119,16 @@ Documented deliberately, because you will hit these.
 The calculation path is the trustworthy one. The research and document features
 are genuinely useful and genuinely experimental, in that order.
 
+## Next: Vasudha Neo
+
+The next model is trained differently. v1–v3 were supervised fine-tunes
+stacked on each other — the setup that erases what the base model already
+knew. Neo restarts from stock Qwen3.5-4B and learns only from its own samples:
+distillation from Qwen3.5-9B on text the 4B wrote itself, then RL with
+verifiable rewards in a real Python sandbox. It does not depend on this app —
+standard chat template, native tool calls, any client. The whole run is one
+command on Modal under a hard $25 cap. See [docs/NEO.md](docs/NEO.md).
+
 ## Architecture
 
 Qwen3-4B converted to a hybrid — most layers Gated Linear Attention (O(1) memory

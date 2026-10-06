@@ -1,0 +1,22 @@
+# Vasudha Neo 4B — Qwen3.5-4B post-trained with on-policy methods only
+# (distillation from Qwen3.5-9B, then RL with verifiable rewards). See
+# docs/NEO.md.
+#
+# No TEMPLATE and no SYSTEM, on purpose. Ollama's built-in Qwen3.5 renderer
+# and parser reproduce the model's own chat template — native tool calls and
+# thinking included — and Neo is trained to work without any particular
+# system prompt, so any client that speaks the Ollama or OpenAI API can drive
+# it with its own tools.
+#
+# Most of the training targeted the fast (non-thinking) mode:
+#     ollama run vasudha-neo --think=false        API: "think": false
+# Thinking mode is still there when you want it (the default).
+FROM ./vasudha-neo-4b-Q4_K_M.gguf
+
+RENDERER qwen3.5
+PARSER qwen3.5
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER num_ctx 32768
