@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 
 import modal
@@ -338,8 +339,10 @@ def _save_state(state: dict) -> None:
     vol.commit()
 
 
+# Non-preemptible: a preempted orchestrator restarts and re-attaches, but
+# not being preempted at all is cheaper than finding out what that breaks.
 @app.function(image=train_image, cpu=ORCH_CPU, memory=int(ORCH_MEM_GIB * 1024), volumes={VOL: vol},
-              secrets=secrets, timeout=24 * 3600)
+              secrets=secrets, timeout=24 * 3600, nonpreemptible=True)
 def pipeline(budget: float = 25.0, skip_smoke: bool = False, opd_max_minutes: float = 85.0,
              grpo_max_minutes: float = 110.0, min_train_minutes: float = 20.0) -> str:
     from neo.budget import BudgetExceeded, Ledger
@@ -365,46 +368,69 @@ def pipeline(budget: float = 25.0, skip_smoke: bool = False, opd_max_minutes: fl
             print(f"[pipeline] {name}: already done")
             return
         rate = gpu_rate if gpu else cpu_rate
-        ledger.ensure(name, estimate + orch_cost())
+        key_call, key_started = f"{name}:call", f"{name}:started"
+        call, started = None, None
+        if state.get(key_call):
+            # A previous orchestrator (preempted, restarted) spawned this stage:
+            # re-attach to it instead of starting it again.
+            prev = modal.FunctionCall.from_id(state[key_call])
+            try:
+                prev.get(timeout=0)
+                call, started = prev, state[key_started]                  # finished meanwhile
+            except (modal.exception.TimeoutError, TimeoutError):
+                call, started = prev, state[key_started]
+                print(f"[pipeline] {name}: re-attaching to the running stage", flush=True)
+            except Exception as exc:  # noqa: BLE001 - it failed while nobody was watching
+                ledger.record(f"{name} (failed unattended)", GPU if gpu else None,
+                              time.time() - state[key_started] + IDLE_S, rate, False, note=str(exc)[:200])
+                vol.commit()
+        if call is None:
+            ledger.ensure(name, estimate + orch_cost())
+            started = time.time()
+            call = fn.spawn(**kwargs)
+            state = _load_state()
+            state[key_call], state[key_started] = call.object_id, started
+            _save_state(state)
         # The hard stop: however the stage behaves (a hang, a slow eval), it is
         # cancelled once it has used the money that is left.
         limit_s = (ledger.remaining() - orch_cost() - IDLE_S / 3600 * rate) / (rate + orch_rate) * 3600
-        print(f"[pipeline] {name}: starting (est ${estimate:.2f}, spent ${ledger.spent() + orch_cost():.2f} of "
-              f"${budget:.2f}, hard stop after {limit_s / 60:.0f} min)", flush=True)
-        started, ok = time.time(), False
-        call = fn.spawn(**kwargs)
+        print(f"[pipeline] {name}: running (est ${estimate:.2f}, spent ${ledger.spent() + orch_cost():.2f} of "
+              f"${budget:.2f}, hard stop {limit_s / 60:.0f} min after its start)", flush=True)
+        outcome = None                                  # "ok" | "failed" | "cap"
         try:
             while True:
                 left = limit_s - (time.time() - started)
                 if left <= 0:
                     call.cancel(terminate_containers=True)
+                    outcome = "cap"
                     raise BudgetExceeded(f"{name} was cancelled at the ${budget:.2f} cap after "
                                          f"{(time.time() - started) / 60:.0f} min")
                 try:
                     call.get(timeout=min(600.0, left))
-                    ok = True
+                    outcome = "ok"
                     break
-                except modal.exception.OutputExpiredError:
-                    raise
                 except (modal.exception.TimeoutError, TimeoutError):   # "not finished yet"
+                    if isinstance(sys.exc_info()[1], modal.exception.OutputExpiredError):
+                        outcome = "failed"
+                        raise
                     used = time.time() - started
                     print(f"[pipeline] {name}: {used / 60:.0f} min, ~${used / 3600 * rate:.2f} so far", flush=True)
+                except Exception:
+                    outcome = "failed"                  # the stage itself raised
+                    raise
         finally:
-            if not ok:
-                # Whatever stopped us (a failed stage, the cap, a bug here), a
-                # stage left running would spend money no ledger sees.
-                try:
-                    call.cancel(terminate_containers=True)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[pipeline] could not cancel {name}: {exc}", flush=True)
-            vol.reload()
-            entry = ledger.record(name, GPU if gpu else None, time.time() - started + IDLE_S, rate, ok)
-            vol.commit()
-            print(f"[pipeline] {name}: {'ok' if ok else 'FAILED'} in {entry.seconds / 60:.1f} min, ${entry.cost:.2f}",
-                  flush=True)
-        state = _load_state()
-        state[name] = "done"
-        _save_state(state)
+            # outcome None means this orchestrator was interrupted (preemption):
+            # the stage keeps running and the restarted orchestrator re-attaches.
+            if outcome is not None:
+                vol.reload()
+                entry = ledger.record(name, GPU if gpu else None, time.time() - started + IDLE_S, rate, outcome == "ok")
+                state = _load_state()
+                state.pop(key_call, None)
+                state.pop(key_started, None)
+                if outcome == "ok":
+                    state[name] = "done"
+                _save_state(state)
+                print(f"[pipeline] {name}: {outcome} in {entry.seconds / 60:.1f} min, ${entry.cost:.2f}", flush=True)
 
     def affordable_minutes(later: list[str]) -> float:
         """Training minutes the remaining money buys after reserving `later`."""
