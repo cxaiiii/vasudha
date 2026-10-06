@@ -164,11 +164,12 @@ pip install modal
 modal token set --token-id <id> --token-secret <secret>     # or: modal setup
 modal secret create huggingface HF_TOKEN=hf_...              # read access is enough
 
-modal run --detach modal_neo.py                 # the whole run, $25 cap
+modal deploy modal_neo.py                       # deploy (repeat after code changes)
+python -c "import modal; modal.Function.from_name('vasudha-neo', 'pipeline').spawn(budget=25.0)"
 modal run modal_neo.py::status                  # spend so far, stages done, results
 ```
 
-`--budget 20` lowers the cap. As a second line of defence, set a workspace
+`budget=20.0` lowers the cap. The pipeline runs on the deployed app, so closing the terminal (or losing the connection) does not stop it. As a second line of defence, set a workspace
 budget in Modal's billing settings. Results land on the `vasudha-neo` volume:
 
 ```bash

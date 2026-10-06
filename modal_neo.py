@@ -1,8 +1,13 @@
 """Vasudha Neo — the whole run on Modal, under a hard dollar cap.
 
-    modal run --detach modal_neo.py                 # everything, $25 cap (default)
-    modal run --detach modal_neo.py --budget 20     # a smaller cap
+    modal deploy modal_neo.py                       # once (and after any code change)
+    python -c "import modal; modal.Function.from_name('vasudha-neo', 'pipeline').spawn(budget=25.0)"
     modal run modal_neo.py::status                  # money spent, stages done, results so far
+
+The pipeline is spawned on a deployed app so nothing local can cancel it:
+with `modal run --detach`, a disconnected client keeps only the last function
+it called alive, and the stage calls the pipeline makes get cancelled.
+`modal run --detach modal_neo.py` still works if the terminal stays connected.
 
 Stages (each resumable — rerunning skips what already finished):
 
