@@ -32,8 +32,12 @@ def main() -> None:
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--lora-alpha", type=int, default=64)
     ap.add_argument("--num-generations", type=int, default=8)
-    ap.add_argument("--batch", type=int, default=16, help="per-device micro-batch (completions)")
-    ap.add_argument("--accum", type=int, default=16, help="micro-batches per optimizer step")
+    # 256 completions (32 prompts x 8) per optimizer step, generated in one
+    # vLLM call. The micro-batch stays small because TRL's GRPO loss builds
+    # full logits: 248k vocab x 1.5k tokens is ~0.76 GB per completion in bf16,
+    # and the backward doubles it.
+    ap.add_argument("--batch", type=int, default=4, help="per-device micro-batch (completions)")
+    ap.add_argument("--accum", type=int, default=64, help="micro-batches per optimizer step")
     ap.add_argument("--max-completion", type=int, default=1536)
     ap.add_argument("--max-prompt-tokens", type=int, default=2048)
     ap.add_argument("--max-tool-iterations", type=int, default=4)
