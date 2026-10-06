@@ -445,16 +445,22 @@ def pipeline(budget: float = 25.0, skip_smoke: bool = False, opd_max_minutes: fl
 
         # Whatever remains after reserving the fixed stages is split ~45/55
         # between distillation and RL (each also pays its own start-up overhead).
-        pool_minutes = affordable_minutes(["stage1", "final_eval", "export"]) - 2 * overhead_min
-        m = min(opd_max_minutes, 0.45 * pool_minutes)
-        if m < min_train_minutes:
-            raise BudgetExceeded(f"only {m:.0f} distillation minutes affordable; stopping before spending more")
-        run("opd", opd, True, (m + overhead_min) / 60 * gpu_rate, minutes=m)
+        def needed(name: str) -> bool:      # sizing only matters for a stage that will run
+            vol.reload()
+            return _load_state().get(name) != "done"
+
+        if needed("opd"):
+            pool_minutes = affordable_minutes(["stage1", "final_eval", "export"]) - 2 * overhead_min
+            m = min(opd_max_minutes, 0.45 * pool_minutes)
+            if m < min_train_minutes:
+                raise BudgetExceeded(f"only {m:.0f} distillation minutes affordable; stopping before spending more")
+            run("opd", opd, True, (m + overhead_min) / 60 * gpu_rate, minutes=m)
         run("stage1", stage1, True, est["stage1"])
-        m = min(grpo_max_minutes, affordable_minutes(["final_eval", "export"]) - overhead_min)
-        if m < min_train_minutes:
-            raise BudgetExceeded(f"only {m:.0f} RL minutes affordable; stopping before spending more")
-        run("grpo", grpo, True, (m + overhead_min) / 60 * gpu_rate, minutes=m)
+        if needed("grpo"):
+            m = min(grpo_max_minutes, affordable_minutes(["final_eval", "export"]) - overhead_min)
+            if m < min_train_minutes:
+                raise BudgetExceeded(f"only {m:.0f} RL minutes affordable; stopping before spending more")
+            run("grpo", grpo, True, (m + overhead_min) / 60 * gpu_rate, minutes=m)
         run("final_eval", final_eval, True, est["final_eval"])
         run("export", export, False, est["export"])
         ok = True
