@@ -210,8 +210,26 @@ def smoke_and_base(skip_smoke: bool = False) -> None:
                       f"{RUNS}/smoke-grpo/merged", "--max-steps 2 --save-steps 1000"))
         _sh(_eval_cmd(f"{RUNS}/smoke-grpo/merged", "smoke", "nothink", "gsm8k,bfcl,eng_tool,ifeval,humaneval", 16))
         vol.commit()
-    if not _exists(f"{EVALS}/base/summary.json"):
+    if not _exists(f"{EVALS}/base/report.md"):          # written only when every suite is scored
         _sh(_eval_cmd(f"{MODELS}/student-text", "base", "nothink,think"))
+        vol.commit()
+
+
+@app.function(**GPU_KW, timeout=2 * 3600)
+def base_eval() -> None:
+    """Finish the stock-model evaluation outside the pipeline (it resumes
+    suite by suite) and record its own cost in the ledger."""
+    from neo.budget import Ledger
+
+    started = time.time()
+    ok = False
+    try:
+        _sh(_eval_cmd(f"{MODELS}/student-text", "base", "nothink,think"))
+        ok = True
+    finally:
+        vol.reload()
+        Ledger(LEDGER, 25.0).record("base_eval (resumed)", GPU, time.time() - started + 60 + IDLE_S, _rate("gpu"), ok,
+                                    note="ran beside the pipeline; +60 s for container start")
         vol.commit()
 
 
@@ -226,7 +244,7 @@ def stage1(n_select: int = 3000, k: int = 4, pool_limit: int = 4000) -> None:
     from neo.data import read_jsonl, write_jsonl
     from neo.evaluate import calibrate, select_by_pass_rate
 
-    if not _exists(f"{EVALS}/stage1/summary.json"):
+    if not _exists(f"{EVALS}/stage1/report.md"):
         _sh(_eval_cmd(f"{MODELS}/neo-stage1-text", "stage1", "nothink"))
         vol.commit()
     if not _exists(f"{DATA}/rl_selected.jsonl"):

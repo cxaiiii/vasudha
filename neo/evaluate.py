@@ -71,6 +71,15 @@ def run(model: str, out_dir: str, suites: list[str], modes: list[str], cache_dir
     tokenizer = llm.get_tokenizer()
     pool = SandboxPool(workers=sandbox_workers, timeout=15)
     summary: dict = {"model": model, "results": {}}
+    # Resume: suites finished by an earlier, interrupted run are kept, not re-run.
+    done_path = os.path.join(out_dir, "summary.json")
+    if os.path.exists(done_path):
+        with open(done_path, encoding="utf-8") as fh:
+            previous = json.load(fh)
+        summary["results"] = {k: v for k, v in previous.get("results", {}).items()
+                              if os.path.exists(os.path.join(out_dir, k.replace("/", "-") + ".jsonl"))}
+        if summary["results"]:
+            log(f"resuming: {len(summary['results'])} suites already scored")
     try:
         for mode in modes:
             cfg = MODE_SETTINGS[mode]
@@ -79,6 +88,8 @@ def run(model: str, out_dir: str, suites: list[str], modes: list[str], cache_dir
                                    max_tokens=cfg["max_tokens"], max_model_len=max_model_len,
                                    temperature=cfg["temperature"], top_p=cfg["top_p"], top_k=cfg["top_k"], seed=0)
             for suite in mode_suites:
+                if f"{mode}/{suite}" in summary["results"]:
+                    continue
                 suite_limit = limit or (THINKING_LIMITS.get(suite) if mode == "think" else None)
                 rows = load_suite(suite, suite_limit, cache_dir)
                 started = time.time()
