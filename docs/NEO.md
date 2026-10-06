@@ -211,6 +211,58 @@ Not tested: anything on a GPU — vLLM colocation, the Gated DeltaNet kernels on
 an H100, memory headroom at full batch size. That is exactly what the
 `smoke_and_base` stage is for, and why it runs before the expensive stages.
 
+## Results of the first run (2026-10-06)
+
+Total cost **$24.92** (ledger on the volume). About $6 of it went to
+crashes and restarts while the pipeline met a GPU for the first time
+(orchestrator bugs, a preemption that cancelled a healthy distillation
+run, one BFCL item without an answer). That money came out of RL, which
+got only 17 steps (~540 tasks).
+
+Fast mode (greedy, no thinking), stock Qwen3.5-4B → Vasudha Neo:
+
+| Suite | Stock | Stage 1 | Neo | Δ |
+|---|---|---|---|---|
+| Engineering + Python tool (300) | 94.0 | 97.0 | **97.3** | +3.3 |
+| Classic sheet, no tool (29) | 79.3 | 93.1 | **93.1** | +13.8 |
+| HumanEval | 82.9 | 83.5 | **84.8** | +1.8 |
+| BFCL v3 (2,095) | 83.5 | 85.3 | **84.8** | +1.3 |
+| MBPP | 79.8 | 79.8 | 80.5 | +0.8 |
+| GSM8K | 93.3 | 93.2 | 93.7 | +0.5 |
+| WebInstruct (300) | 48.3 | 47.3 | 48.3 | 0 |
+| AIME 2025 (30) | 20.0 | 10.0 | 20.0 | 0 |
+| MATH-500 | 81.6 | 81.6 | 81.0 | −0.6 |
+| Engineering, no tool | 92.0 | 91.7 | 91.0 | −1.0 |
+| MMLU-Pro (1,400) | 67.1 | 65.8 | 65.7 | −1.4 |
+| IFEval | 82.4 | 81.1 | 80.0 | −2.4 |
+| Classic sheet + tool (29) | 96.6 | 93.1 | 93.1 | −3.4 |
+
+Thinking mode (not trained) **regressed**: classic sheet 79.3 → 58.6,
+engineering 66.0 → 55.0, IFEval 57.9 → 49.9, MATH-500 62.4 → 58.0;
+MMLU-Pro 74.1 → 75.5 and AIME 16.7 → 20.0. Thinking answers got longer under
+the 16,384-token evaluation cap, and the cap truncates a lot of them, for
+both models. **Use Neo in fast mode** (`--think=false`); for thinking mode
+the stock model is currently better.
+
+Verdict: a modest, real gain on what was trained (tool-using engineering
+numerics, function calling, code), small losses on instruction following
+and knowledge, and a thinking-mode regression. Not the decisive win the
+recipe is designed for. The obvious next run: the same pipeline with the
+bugs fixed, so the money goes to RL (≈100 min instead of 44), plus a slice
+of thinking-mode RL so that mode is trained rather than left to drift.
+
+Artifacts on the `vasudha-neo` volume:
+
+| File | Size |
+|---|---|
+| `neo/gguf/vasudha-neo-4b-Q4_K_M.gguf` | 2.71 GB |
+| `neo/gguf/vasudha-neo-4b-Q3_K_M.gguf` | 2.26 GB |
+| `neo/gguf/vasudha-neo-4b-Q8_0.gguf` | 4.48 GB |
+| `neo/gguf/vasudha-neo-4b-f16.gguf` | 8.42 GB |
+| `neo/gguf/mmproj-vasudha-neo-4b-f16.gguf` (vision) | 0.67 GB |
+| `neo/models/vasudha-neo-4b/` (full HF checkpoint) | |
+| `neo/evals/{base,stage1,final}/` (every reply, JSONL) | |
+
 ## What to expect, honestly
 
 Likely, based on what these methods have done for models of this size:
